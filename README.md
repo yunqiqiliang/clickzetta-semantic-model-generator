@@ -1,6 +1,6 @@
 # semantic-model-generator
 
-The ClickZetta Semantic Model Generator is a Streamlit-based companion app that helps teams inspect ClickZetta tables, scaffold semantic YAML, and iterate on partner integrations. It now targets ClickZetta’s Lakehouse APIs and ClickZetta volumes by default.
+The ClickZetta Semantic Model Generator is a Streamlit companion built for ClickZetta teams. Use it to explore Lakehouse metadata, author and refine semantic YAML, and plug into partner workflows—everything runs against ClickZetta’s Lakehouse APIs and backed volumes by default.
 
 ## Requirements
 
