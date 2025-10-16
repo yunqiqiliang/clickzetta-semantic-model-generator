@@ -343,13 +343,10 @@ def _format_literal(value: str, base_type: str) -> str:
 
 def _format_sql_identifier(name: str) -> str:
     """
-    Formats an identifier for SQL (without quoting) by normalizing casing and invalid characters.
+    Formats an identifier for SQL (without quoting) by stripping quotes and uppercasing.
     """
     if not name:
         return ""
-    sanitized = _sanitize_identifier_name(name)
-    if sanitized:
-        return sanitized.upper()
     return str(name).replace('"', "").replace("`", "").strip().upper()
 
 
