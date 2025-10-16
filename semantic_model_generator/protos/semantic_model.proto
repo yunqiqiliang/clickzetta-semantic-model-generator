@@ -351,6 +351,8 @@ message SemanticModel {
   string description = 2 [ (optional) = true ];
   // List of tables in this project.
   repeated Table tables = 3;
+  // Derived metrics scoped to the entire semantic model.
+  repeated Metric metrics = 4 [ (optional) = true ];
   // List of relationships in this project.
   repeated Relationship relationships = 5 [ (optional) = true ];
   // List of verified queries for this semantic model.

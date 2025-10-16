@@ -1316,6 +1316,7 @@ def raw_schema_to_semantic_context(
                 client,
                 placeholder=_PLACEHOLDER_COMMENT,
                 custom_prompt=llm_custom_prompt,
+                session=conn,
             )
             _notify("DashScope enrichment complete.")
         else:

@@ -48,6 +48,9 @@ You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to p
   - Table selector dialog now includes an optional prompt text area shown when enrichment is enabled.
   - User-supplied guidance is appended to the DashScope prompt, enabling bespoke descriptions and business context.
   - Back-end plumbing `run_generate_model_str_from_clickzetta` → `generate_model_str_from_clickzetta` → `enrich_semantic_model` now accepts `llm_custom_prompt`.
+- **Model-level metrics and verified queries**:
+  - After table enrichment, DashScope now proposes semantic-model metrics (`semantic_model.metrics`) to highlight business KPIs.
+  - Verified queries (question + SQL) are generated, executed against ClickZetta for validation, and appended to the YAML when successful.
 
 ### Testing
 

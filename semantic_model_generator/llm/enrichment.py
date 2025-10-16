@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+import time
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from loguru import logger
 
@@ -10,6 +11,11 @@ from semantic_model_generator.data_processing import data_types
 from semantic_model_generator.protos import semantic_model_pb2
 
 from .dashscope_client import DashscopeClient, DashscopeError
+
+if TYPE_CHECKING:  # pragma: no cover
+    from clickzetta.zettapark.session import Session
+else:  # Fallback type when ClickZetta libraries are unavailable
+    Session = Any  # type: ignore
 
 _JSON_BLOCK_PATTERN = re.compile(r"\{.*\}", re.DOTALL)
 _NUMERIC_TYPES = {
@@ -37,6 +43,7 @@ def enrich_semantic_model(
     client: DashscopeClient,
     placeholder: str = "  ",
     custom_prompt: str = "",
+    session: Optional[Session] = None,
 ) -> None:
     """
     Enriches the semantic model in-place using DashScope generated descriptions.
@@ -47,6 +54,7 @@ def enrich_semantic_model(
         client: DashScope chat client used to execute completions.
         placeholder: Placeholder string designating missing content.
         custom_prompt: Optional user-provided guidance appended to the LLM prompt.
+        session: Optional ClickZetta session used for validating generated SQL (e.g., verified queries).
     """
 
     if not model.tables or not raw_tables:
@@ -82,6 +90,28 @@ def enrich_semantic_model(
             logger.exception("Unexpected error enriching table {}: {}", table.name, exc)
     if model.description == placeholder or not model.description.strip():
         _summarize_model_description(model, client, placeholder)
+
+    overview = _build_model_overview(model, raw_lookup, raw_tables)
+    try:
+        _generate_model_metrics(model, overview, client, placeholder, custom_prompt)
+    except DashscopeError as exc:
+        logger.warning("Failed to generate model-level metrics: {}", exc)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception("Unexpected error generating model metrics: {}", exc)
+
+    try:
+        _generate_verified_queries(
+            model,
+            overview,
+            client,
+            placeholder,
+            custom_prompt,
+            session=session,
+        )
+    except DashscopeError as exc:
+        logger.warning("Failed to generate verified queries: {}", exc)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception("Unexpected error generating verified queries: {}", exc)
 
     if metric_notes:
         model.custom_instructions = "\n".join(metric_notes)
@@ -612,3 +642,313 @@ def _summarize_model_description(
             model.description = summary
     except DashscopeError as exc:  # pragma: no cover - defensive
         logger.warning("Failed to summarize semantic model description: {}", exc)
+
+
+def _build_model_overview(
+    model: semantic_model_pb2.SemanticModel,
+    raw_lookup: Dict[str, data_types.Table],
+    raw_tables: Sequence[Tuple[data_types.FQNParts, data_types.Table]],
+) -> Dict[str, Any]:
+    overview: Dict[str, Any] = {
+        "name": model.name,
+        "description": (model.description or "").strip(),
+        "tables": [],
+        "relationships": [],
+        "custom_instructions": (model.custom_instructions or "").strip(),
+    }
+
+    base_lookup: Dict[str, Dict[str, str]] = {}
+    for fqn, _ in raw_tables:
+        key = fqn.table.upper()
+        base_lookup[key] = {
+            "database": fqn.database,
+            "schema": fqn.schema_name,
+            "table": fqn.table,
+        }
+
+    for table in model.tables:
+        table_info: Dict[str, Any] = {
+            "name": table.name,
+            "description": (table.description or "").strip(),
+            "base_table": {
+                "database": table.base_table.database if table.HasField("base_table") else "",
+                "schema": table.base_table.schema if table.HasField("base_table") else "",
+                "table": table.base_table.table if table.HasField("base_table") else "",
+            },
+            "dimensions": [
+                {
+                    "name": dim.name,
+                    "expr": dim.expr,
+                    "data_type": dim.data_type,
+                    "description": (dim.description or "").strip(),
+                }
+                for dim in table.dimensions
+            ],
+            "time_dimensions": [
+                {
+                    "name": dim.name,
+                    "expr": dim.expr,
+                    "data_type": dim.data_type,
+                    "description": (dim.description or "").strip(),
+                }
+                for dim in table.time_dimensions
+            ],
+            "facts": [
+                {
+                    "name": fact.name,
+                    "expr": fact.expr,
+                    "data_type": fact.data_type,
+                    "description": (fact.description or "").strip(),
+                }
+                for fact in table.facts
+            ],
+            "metrics": [
+                {
+                    "name": metric.name,
+                    "expr": metric.expr,
+                    "description": (metric.description or "").strip(),
+                }
+                for metric in table.metrics
+            ],
+            "filters": [
+                {
+                    "name": nf.name,
+                    "expr": nf.expr,
+                    "description": (nf.description or "").strip(),
+                }
+                for nf in table.filters
+            ],
+        }
+
+        # Provide raw column snapshot for additional context.
+        raw_table = raw_lookup.get(table.name.upper())
+        if raw_table:
+            sample_columns = []
+            for col in raw_table.columns[:5]:
+                sample_columns.append(
+                    {
+                        "name": col.column_name,
+                        "data_type": col.column_type,
+                        "sample_values": (col.values or [])[:3] if col.values else [],
+                    }
+                )
+            if sample_columns:
+                table_info["sample_columns"] = sample_columns
+
+        if not table_info["base_table"].get("table"):
+            # Fallback to raw table mapping when proto base_table is missing.
+            fallback = base_lookup.get(table.name.upper())
+            if fallback:
+                table_info["base_table"] = fallback
+
+        overview["tables"].append(table_info)
+
+    for rel in model.relationships:
+        overview["relationships"].append(
+            {
+                "name": rel.name,
+                "left_table": rel.left_table,
+                "right_table": rel.right_table,
+                "join_type": semantic_model_pb2.JoinType.Name(rel.join_type),
+                "relationship_type": semantic_model_pb2.RelationshipType.Name(rel.relationship_type),
+                "columns": [
+                    {"left_column": col.left_column, "right_column": col.right_column}
+                    for col in rel.relationship_columns
+                ],
+            }
+        )
+
+    return overview
+
+
+def _generate_model_metrics(
+    model: semantic_model_pb2.SemanticModel,
+    overview: Dict[str, Any],
+    client: DashscopeClient,
+    placeholder: str,
+    custom_prompt: str,
+    max_items: int = 5,
+) -> None:
+    if not overview.get("tables"):
+        return
+
+    prompt_json = json.dumps(overview, ensure_ascii=False, indent=2)
+    instructions = (
+        "Design up to three model-level business metrics (KPIs) using the semantic model summary below.\n"
+        "Return JSON with the structure:\n"
+        "{\n"
+        "  \"model_metrics\": [\n"
+        "    {\n"
+        "      \"name\": \"...\",\n"
+        "      \"expr\": \"SUM(FACT_SALES.total_amount)\",\n"
+        "      \"description\": \"...\",\n"
+        "      \"synonyms\": [\"...\"]\n"
+        "    }\n"
+        "  ]\n"
+        "}\n"
+        "Guidelines: use the provided table and column names exactly; prefer SUM/AVG/COUNT-style aggregates; avoid duplicates of existing table metrics."
+        f"\n\nSemantic model summary:```json\n{prompt_json}\n```"
+    )
+    if custom_prompt.strip():
+        instructions += f"\n\nUser guidance: {custom_prompt.strip()}"
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an analytics engineer. Only respond in JSON and propose business-friendly metrics."
+            ),
+        },
+        {"role": "user", "content": instructions},
+    ]
+
+    response = client.chat_completion(messages)
+    payload = _parse_llm_response(response.content)
+    if not isinstance(payload, dict):
+        return
+
+    entries = payload.get("model_metrics")
+    if not isinstance(entries, list):
+        return
+
+    existing_names: set[str] = {metric.name for metric in model.metrics}
+    for table in model.tables:
+        existing_names.update(metric.name for metric in table.metrics)
+
+    added = 0
+    for entry in entries:
+        if added >= max_items:
+            break
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        expr = entry.get("expr")
+        if not isinstance(name, str) or not name.strip():
+            continue
+        if not isinstance(expr, str) or not expr.strip():
+            continue
+
+        metric = model.metrics.add()
+        metric.name = _sanitize_metric_name(name, existing_names)
+        metric.expr = expr.strip().rstrip(";")
+
+        description = entry.get("description")
+        if isinstance(description, str) and description.strip():
+            metric.description = description.strip()
+        else:
+            metric.description = placeholder
+
+        synonyms = entry.get("synonyms")
+        if isinstance(synonyms, list):
+            clean_synonyms = [str(item).strip() for item in synonyms if isinstance(item, (str, int, float)) and str(item).strip()]
+            if clean_synonyms:
+                metric.synonyms.extend(clean_synonyms)
+
+        if not metric.synonyms:
+            metric.synonyms.append(name.strip())
+        added += 1
+
+
+def _sanitize_query_name(name: str, existing: set[str]) -> str:
+    base = name.strip() or "Verified query"
+    candidate = base
+    counter = 2
+    while candidate.lower() in existing:
+        candidate = f"{base} ({counter})"
+        counter += 1
+    existing.add(candidate.lower())
+    return candidate
+
+
+def _ensure_limit_clause(sql: str, default_limit: int = 200) -> str:
+    normalized = sql.rstrip().rstrip(";")
+    if " limit " in normalized.lower():
+        return normalized
+    return f"{normalized} LIMIT {default_limit}"
+
+
+def _generate_verified_queries(
+    model: semantic_model_pb2.SemanticModel,
+    overview: Dict[str, Any],
+    client: DashscopeClient,
+    placeholder: str,
+    custom_prompt: str,
+    session: Optional[Session] = None,
+    max_items: int = 3,
+) -> None:
+    if session is None:
+        logger.debug("Skipping verified query generation because no ClickZetta session was provided.")
+        return
+
+    prompt_json = json.dumps(overview, ensure_ascii=False, indent=2)
+    instructions = (
+        "Propose up to three verified analytics queries for the semantic model below. Each query must include:\n"
+        "- `name`: short title\n"
+        "- `question`: business question answered\n"
+        "- `sql`: runnable ClickZetta SQL referencing the provided logical tables\n"
+        "Return JSON with `verified_queries`. Ensure every SQL statement includes an ORDER BY when needed and a LIMIT (<=200) to keep result sets small."
+        f"\n\nSemantic model summary:```json\n{prompt_json}\n```"
+    )
+    if custom_prompt.strip():
+        instructions += f"\n\nUser guidance: {custom_prompt.strip()}"
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You create example analytical queries. Return JSON only. Make sure SQL uses valid column names and respects join relationships."
+            ),
+        },
+        {"role": "user", "content": instructions},
+    ]
+
+    response = client.chat_completion(messages)
+    payload = _parse_llm_response(response.content)
+    if not isinstance(payload, dict):
+        return
+
+    entries = payload.get("verified_queries")
+    if not isinstance(entries, list):
+        return
+
+    existing_names = {vq.name.lower() for vq in model.verified_queries}
+    existing_sql = {vq.sql.strip().lower() for vq in model.verified_queries}
+
+    for entry in entries[:max_items]:
+        if not isinstance(entry, dict):
+            continue
+        question = entry.get("question")
+        sql = entry.get("sql")
+        if not isinstance(sql, str) or not sql.strip():
+            continue
+        query_name = entry.get("name")
+        if not isinstance(query_name, str) or not query_name.strip():
+            query_name = question if isinstance(question, str) and question.strip() else "Verified query"
+
+        normalized_sql = _ensure_limit_clause(sql)
+        if normalized_sql.strip().lower() in existing_sql:
+            continue
+
+        try:
+            session.sql(normalized_sql).to_pandas()
+        except Exception as exc:  # pragma: no cover - ClickZetta query failed
+            logger.warning("Skipping verified query '%s' due to validation failure: %s", query_name, exc)
+            continue
+
+        verified_query = model.verified_queries.add()
+        verified_query.name = _sanitize_query_name(query_name, existing_names)
+        if isinstance(question, str) and question.strip():
+            verified_query.question = question.strip()
+        else:
+            verified_query.question = verified_query.name
+        verified_query.sql = normalized_sql
+        if hasattr(verified_query, "semantic_model_name"):
+            verified_query.semantic_model_name = model.name
+        verified_query.verified_at = int(time.time())
+        verified_query.verified_by = "DashScope Auto-Validation"
+
+        use_as_onboarding = entry.get("use_as_onboarding_question")
+        if isinstance(use_as_onboarding, bool):
+            verified_query.use_as_onboarding_question = use_as_onboarding
+
+        existing_sql.add(normalized_sql.strip().lower())

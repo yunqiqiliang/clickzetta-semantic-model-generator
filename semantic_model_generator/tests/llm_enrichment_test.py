@@ -8,11 +8,17 @@ from semantic_model_generator.protos import semantic_model_pb2
 
 
 class _FakeDashscopeClient:
-    def __init__(self, payload: dict) -> None:
-        self._payload = payload
+    def __init__(self, payloads):
+        if isinstance(payloads, list):
+            self._payloads = payloads
+        else:
+            self._payloads = [payloads]
+        self._index = 0
 
     def chat_completion(self, messages):  # type: ignore[no-untyped-def]
-        return DashscopeResponse(content=json.dumps(self._payload, ensure_ascii=False), request_id="test")
+        payload = self._payloads[self._index] if self._index < len(self._payloads) else self._payloads[-1]
+        self._index += 1
+        return DashscopeResponse(content=json.dumps(payload, ensure_ascii=False), request_id=f"test_{self._index}")
 
 
 def test_enrich_semantic_model_populates_descriptions_and_synonyms() -> None:
@@ -101,7 +107,7 @@ def test_enrich_semantic_model_populates_descriptions_and_synonyms() -> None:
         "model_description": "Semantic model for customer orders and related metrics.",
     }
 
-    client = _FakeDashscopeClient(fake_response)
+    client = _FakeDashscopeClient([fake_response, {"model_metrics": []}, {"verified_queries": []}])
     enrich_semantic_model(
         model,
         [(FQNParts(database="SALES", schema_name="PUBLIC", table="ORDERS"), raw_table)],
@@ -133,3 +139,106 @@ def test_enrich_semantic_model_populates_descriptions_and_synonyms() -> None:
 
     assert model.custom_instructions == ""
     assert model.description == "Semantic model for customer orders and related metrics."
+
+
+class _FakeSession:
+    class _Result:
+        @staticmethod
+        def to_pandas():  # type: ignore[no-untyped-def]
+            return None
+
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    def sql(self, query):  # type: ignore[no-untyped-def]
+        self.queries.append(query)
+        return _FakeSession._Result()
+
+
+def test_enrich_semantic_model_generates_model_metrics_and_verified_queries() -> None:
+    raw_table = Table(
+        id_=0,
+        name="orders",
+        columns=[
+            Column(id_=0, column_name="order_id", column_type="NUMBER", values=["1", "2"]),
+            Column(id_=1, column_name="total_amount", column_type="NUMBER", values=["10", "20"]),
+        ],
+    )
+
+    table_proto = semantic_model_pb2.Table(
+        name="ORDERS",
+        description="  ",
+        base_table=semantic_model_pb2.FullyQualifiedTable(database="SALES", schema="PUBLIC", table="ORDERS"),
+        facts=[
+            semantic_model_pb2.Fact(
+                name="total_amount",
+                expr="total_amount",
+                data_type="DECIMAL",
+                description="  ",
+            )
+        ],
+    )
+
+    model = semantic_model_pb2.SemanticModel(name="Orders Model", tables=[table_proto])
+
+    table_payload = {
+        "table_description": "Orders fact table with totals.",
+        "columns": [
+            {
+                "name": "total_amount",
+                "description": "Order total amount including taxes.",
+                "synonyms": ["Order amount"],
+            }
+        ],
+        "business_metrics": [],
+        "filters": [],
+    }
+
+    model_metrics_payload = {
+        "model_metrics": [
+            {
+                "name": "Total revenue",
+                "expr": "SUM(ORDERS.total_amount)",
+                "description": "Sum of total_amount across all orders.",
+                "synonyms": ["Revenue"],
+            }
+        ]
+    }
+
+    verified_queries_payload = {
+        "verified_queries": [
+            {
+                "name": "Recent orders",
+                "question": "What are the most recent orders?",
+                "sql": "SELECT order_id, total_amount FROM ORDERS ORDER BY order_id DESC",
+                "use_as_onboarding_question": True,
+            }
+        ]
+    }
+
+    client = _FakeDashscopeClient([table_payload, model_metrics_payload, verified_queries_payload])
+    session = _FakeSession()
+
+    enrich_semantic_model(
+        model,
+        [(FQNParts(database="SALES", schema_name="PUBLIC", table="ORDERS"), raw_table)],
+        client,
+        placeholder="  ",
+        session=session,
+    )
+
+    # Model-level metrics appended
+    assert len(model.metrics) == 1
+    metric = model.metrics[0]
+    assert metric.expr == "SUM(ORDERS.total_amount)"
+    assert metric.description == "Sum of total_amount across all orders."
+    assert "Revenue" in list(metric.synonyms)
+
+    # Verified queries validated and appended
+    assert len(model.verified_queries) == 1
+    verified = model.verified_queries[0]
+    assert verified.question == "What are the most recent orders?"
+    assert verified.sql.strip().lower().endswith("limit 200")
+    assert verified.use_as_onboarding_question is True
+    assert verified.verified_by
+    assert session.queries and session.queries[0] == verified.sql
