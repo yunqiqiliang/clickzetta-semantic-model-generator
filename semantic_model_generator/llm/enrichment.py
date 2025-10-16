@@ -772,6 +772,14 @@ def _generate_model_metrics(
     if not overview.get("tables"):
         return
 
+    fact_tables = sum(1 for table in model.tables if len(table.facts) > 0)
+    if fact_tables <= 1:
+        logger.debug(
+            "Skipping model-level metrics because only %s fact table(s) were detected.",
+            fact_tables,
+        )
+        return
+
     prompt_json = json.dumps(overview, ensure_ascii=False, indent=2)
     instructions = (
         "Design up to three model-level business metrics (KPIs) using the semantic model summary below.\n"

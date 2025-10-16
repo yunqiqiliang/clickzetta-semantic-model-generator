@@ -156,7 +156,7 @@ class _FakeSession:
 
 
 def test_enrich_semantic_model_generates_model_metrics_and_verified_queries() -> None:
-    raw_table = Table(
+    raw_orders = Table(
         id_=0,
         name="orders",
         columns=[
@@ -165,7 +165,16 @@ def test_enrich_semantic_model_generates_model_metrics_and_verified_queries() ->
         ],
     )
 
-    table_proto = semantic_model_pb2.Table(
+    raw_payments = Table(
+        id_=1,
+        name="payments",
+        columns=[
+            Column(id_=0, column_name="payment_id", column_type="NUMBER", values=["1", "2"]),
+            Column(id_=1, column_name="amount", column_type="NUMBER", values=["5", "15"]),
+        ],
+    )
+
+    orders_proto = semantic_model_pb2.Table(
         name="ORDERS",
         description="  ",
         base_table=semantic_model_pb2.FullyQualifiedTable(database="SALES", schema="PUBLIC", table="ORDERS"),
@@ -179,7 +188,21 @@ def test_enrich_semantic_model_generates_model_metrics_and_verified_queries() ->
         ],
     )
 
-    model = semantic_model_pb2.SemanticModel(name="Orders Model", tables=[table_proto])
+    payments_proto = semantic_model_pb2.Table(
+        name="PAYMENTS",
+        description="  ",
+        base_table=semantic_model_pb2.FullyQualifiedTable(database="SALES", schema="PUBLIC", table="PAYMENTS"),
+        facts=[
+            semantic_model_pb2.Fact(
+                name="amount",
+                expr="amount",
+                data_type="DECIMAL",
+                description="  ",
+            )
+        ],
+    )
+
+    model = semantic_model_pb2.SemanticModel(name="Orders Model", tables=[orders_proto, payments_proto])
 
     table_payload = {
         "table_description": "Orders fact table with totals.",
@@ -188,6 +211,19 @@ def test_enrich_semantic_model_generates_model_metrics_and_verified_queries() ->
                 "name": "total_amount",
                 "description": "Order total amount including taxes.",
                 "synonyms": ["Order amount"],
+            }
+        ],
+        "business_metrics": [],
+        "filters": [],
+    }
+
+    table_payload_payments = {
+        "table_description": "Payments fact table with amounts.",
+        "columns": [
+            {
+                "name": "amount",
+                "description": "Payment amount per transaction.",
+                "synonyms": ["Payment amount"],
             }
         ],
         "business_metrics": [],
@@ -216,12 +252,20 @@ def test_enrich_semantic_model_generates_model_metrics_and_verified_queries() ->
         ]
     }
 
-    client = _FakeDashscopeClient([table_payload, model_metrics_payload, verified_queries_payload])
+    client = _FakeDashscopeClient([
+        table_payload,
+        table_payload_payments,
+        model_metrics_payload,
+        verified_queries_payload,
+    ])
     session = _FakeSession()
 
     enrich_semantic_model(
         model,
-        [(FQNParts(database="SALES", schema_name="PUBLIC", table="ORDERS"), raw_table)],
+        [
+            (FQNParts(database="SALES", schema_name="PUBLIC", table="ORDERS"), raw_orders),
+            (FQNParts(database="SALES", schema_name="PUBLIC", table="PAYMENTS"), raw_payments),
+        ],
         client,
         placeholder="  ",
         session=session,
@@ -242,3 +286,62 @@ def test_enrich_semantic_model_generates_model_metrics_and_verified_queries() ->
     assert verified.use_as_onboarding_question is True
     assert verified.verified_by
     assert session.queries and session.queries[0] == verified.sql
+
+
+def test_model_metrics_skipped_with_single_fact_table() -> None:
+    raw_orders = Table(
+        id_=0,
+        name="orders",
+        columns=[
+            Column(id_=0, column_name="order_id", column_type="NUMBER", values=["1", "2"]),
+            Column(id_=1, column_name="total_amount", column_type="NUMBER", values=["10", "20"]),
+        ],
+    )
+
+    orders_proto = semantic_model_pb2.Table(
+        name="ORDERS",
+        description="  ",
+        base_table=semantic_model_pb2.FullyQualifiedTable(database="SALES", schema="PUBLIC", table="ORDERS"),
+        facts=[
+            semantic_model_pb2.Fact(
+                name="total_amount",
+                expr="total_amount",
+                data_type="DECIMAL",
+                description="  ",
+            )
+        ],
+    )
+
+    model = semantic_model_pb2.SemanticModel(name="Orders Model", tables=[orders_proto])
+
+    table_payload = {
+        "table_description": "Orders fact table with totals.",
+        "columns": [],
+        "business_metrics": [],
+        "filters": [],
+    }
+
+    model_metrics_payload = {
+        "model_metrics": [
+            {
+                "name": "Should not be added",
+                "expr": "SUM(ORDERS.total_amount)",
+                "description": "Not expected.",
+            }
+        ]
+    }
+
+    verified_queries_payload = {"verified_queries": []}
+
+    client = _FakeDashscopeClient([table_payload, model_metrics_payload, verified_queries_payload])
+    session = _FakeSession()
+
+    enrich_semantic_model(
+        model,
+        [(FQNParts(database="SALES", schema_name="PUBLIC", table="ORDERS"), raw_orders)],
+        client,
+        placeholder="  ",
+        session=session,
+    )
+
+    assert len(model.metrics) == 0
