@@ -36,9 +36,17 @@ def enrich_semantic_model(
     raw_tables: Sequence[Tuple[data_types.FQNParts, data_types.Table]],
     client: DashscopeClient,
     placeholder: str = "  ",
+    custom_prompt: str = "",
 ) -> None:
     """
     Enriches the semantic model in-place using DashScope generated descriptions.
+
+    Args:
+        model: The semantic model proto to enrich (modified in-place).
+        raw_tables: Sequence of raw table metadata paired with FQN parts.
+        client: DashScope chat client used to execute completions.
+        placeholder: Placeholder string designating missing content.
+        custom_prompt: Optional user-provided guidance appended to the LLM prompt.
     """
 
     if not model.tables or not raw_tables:
@@ -134,6 +142,8 @@ def _serialize_table_prompt(
         "semantic_model_description": model_description,
     }
 
+    extra_instructions = custom_prompt.strip()
+
     user_instructions = (
         "Review the JSON metadata below and reply with a strictly JSON response.\n"
         "1. If a table or column description is empty, provide a concise English description; do not duplicate existing text.\n"
@@ -163,6 +173,9 @@ def _serialize_table_prompt(
         "}\n\n"
         f"Metadata: ```json\n{json.dumps(prompt_payload, ensure_ascii=False, indent=2)}\n```"
     )
+
+    if extra_instructions:
+        user_instructions += f"\n\nUser guidance: {extra_instructions}"
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},

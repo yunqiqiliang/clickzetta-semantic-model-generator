@@ -24,6 +24,7 @@ from semantic_model_generator.data_processing.proto_utils import (
 from semantic_model_generator.generate_model import (
     generate_model_str_from_clickzetta,
     raw_schema_to_semantic_context,
+    _DEFAULT_N_SAMPLE_VALUES_PER_COL,
 )
 from semantic_model_generator.protos import semantic_model_pb2
 from semantic_model_generator.protos.semantic_model_pb2 import Dimension, Table
@@ -1359,12 +1360,22 @@ def input_sample_value_num() -> int:
         int: The maximum number of sample values per column.
     """
 
-    sample_values_choices = list(range(1, 40))
+    sample_values_choices = list(range(10, 501, 10))
+    default_sample = _DEFAULT_N_SAMPLE_VALUES_PER_COL or 10
+    try:
+        default_index = sample_values_choices.index(
+            min(sample_values_choices, key=lambda choice: abs(choice - default_sample))
+        )
+    except ValueError:
+        default_index = 0
     sample_values: int = st.selectbox(  # type: ignore
         "Maximum number of sample values per column",
         sample_values_choices,
-        index=min(9, len(sample_values_choices) - 1),
-        help="Specifies the maximum number of distinct sample values we fetch for each column. We suggest keeping this number as low as possible to reduce latency.",
+        index=default_index,
+        help=(
+            "Specifies the maximum number of distinct sample values we fetch for each column. "
+            "Increasing this can improve cardinality and join inference at the cost of additional metadata queries."
+        ),
     )
     return sample_values
 
@@ -1374,7 +1385,9 @@ def run_generate_model_str_from_clickzetta(
     sample_values: int,
     base_tables: list[str],
     allow_joins: Optional[bool] = True,
+    strict_join_inference: bool = False,
     enrich_with_llm: bool = False,
+    llm_custom_prompt: str = "",
 ) -> None:
     """
     Runs generate_model_str_from_clickzetta to generate the semantic shell.
@@ -1382,6 +1395,9 @@ def run_generate_model_str_from_clickzetta(
         model_name (str): Semantic file name (without .yaml suffix).
         sample_values (int): Number of sample values to provide for each table in generation.
         base_tables (list[str]): List of fully-qualified ClickZetta tables to include in the semantic model.
+        allow_joins (Optional[bool]): Whether to infer join relationships.
+        strict_join_inference (bool): When True, run extra SQL probes to detect nullable foreign keys for join typing.
+        llm_custom_prompt (str): Optional user-supplied instructions forwarded to DashScope enrichment.
 
     Returns: None
     """
@@ -1410,7 +1426,9 @@ def run_generate_model_str_from_clickzetta(
                 n_sample_values=sample_values,  # type: ignore
                 conn=connection.session,
                 allow_joins=allow_joins,
+                strict_join_inference=strict_join_inference,
                 enrich_with_llm=enrich_with_llm,
+                llm_custom_prompt=llm_custom_prompt,
                 progress_callback=progress_callback,
             )
         except Exception as exc:

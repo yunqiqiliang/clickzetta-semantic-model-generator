@@ -650,7 +650,7 @@ def yaml_editor(yaml_str: str) -> None:
         update_container(status_container, "editing", prefix=status_container_title)
 
 
-@st.experimental_dialog("Welcome to the Iteration app! 💬", width="large")
+@st.experimental_dialog("Please Select a Semantic Model File! ", width="large")
 def set_up_requirements() -> None:
     """
     Collects existing YAML location from the user so that we can download it.
@@ -692,6 +692,12 @@ def set_up_requirements() -> None:
         help="Checking this box will enable you to add/edit join paths in your semantic model. If enabling this setting, please ensure that you have the proper parameters set on your ClickZetta workspace.",
     )
 
+    strict_join_inference = st.checkbox(
+        "Strict join inference (extra SQL)",
+        value=st.session_state.get("strict_join_inference", False),
+        help="Runs additional `IS NULL` probes on foreign-key columns to improve join type accuracy. Enable only if you are comfortable with extra metadata queries.",
+    )
+
     action_disabled = (
         not st.session_state["selected_iteration_database"]
         or not st.session_state["selected_iteration_schema"]
@@ -716,6 +722,7 @@ def set_up_requirements() -> None:
             st.session_state["file_name"] = file_name
             st.session_state["page"] = GeneratorAppScreen.ITERATION
             st.session_state["experimental_features"] = experimental_features
+            st.session_state["strict_join_inference"] = strict_join_inference
             st.rerun()
 
     with delete_col:

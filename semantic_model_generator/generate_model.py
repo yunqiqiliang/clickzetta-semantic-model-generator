@@ -1,8 +1,9 @@
 import os
 import re
+import math
 from collections import defaultdict
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from clickzetta.zettapark.session import Session
 from loguru import logger
@@ -340,6 +341,343 @@ def _format_literal(value: str, base_type: str) -> str:
     return f"'{escaped}'"
 
 
+def _format_sql_identifier(name: str) -> str:
+    """
+    Formats an identifier for SQL (without quoting) by normalizing casing and invalid characters.
+    """
+    if not name:
+        return ""
+    sanitized = _sanitize_identifier_name(name)
+    if sanitized:
+        return sanitized.upper()
+    return str(name).replace('"', "").replace("`", "").strip().upper()
+
+
+def _qualified_table_name(fqn: data_types.FQNParts) -> str:
+    """
+    Builds a fully qualified table name without quoting.
+    """
+    parts = [part for part in (fqn.database, fqn.schema_name, fqn.table) if part]
+    return ".".join(_format_sql_identifier(part) for part in parts if part)
+
+
+def _levenshtein_distance(s1: str, s2: str) -> int:
+    """
+    Calculate Levenshtein distance between two strings.
+    Used for fuzzy column name matching.
+    """
+    if len(s1) < len(s2):
+        return _levenshtein_distance(s2, s1)
+    if len(s2) == 0:
+        return len(s1)
+    
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    
+    return previous_row[-1]
+
+
+def _name_similarity(name1: str, name2: str) -> float:
+    """
+    Calculate normalized similarity score between two column names.
+    Returns a score between 0.0 (completely different) and 1.0 (identical).
+    """
+    if not name1 or not name2:
+        return 0.0
+    
+    # Exact match
+    if name1.upper() == name2.upper():
+        return 1.0
+    
+    # Normalize names for comparison
+    norm1 = name1.upper().replace("_", "").replace("-", "")
+    norm2 = name2.upper().replace("_", "").replace("-", "")
+    
+    if norm1 == norm2:
+        return 0.95
+    
+    # Calculate Levenshtein-based similarity
+    max_len = max(len(norm1), len(norm2))
+    if max_len == 0:
+        return 0.0
+    
+    distance = _levenshtein_distance(norm1, norm2)
+    similarity = 1.0 - (distance / max_len)
+    
+    return max(0.0, similarity)
+
+
+def _infer_cardinality(
+    left_values: List[str],
+    right_values: List[str],
+    left_is_pk: bool,
+    right_is_pk: bool,
+) -> tuple[str, str]:
+    """
+    Infer relationship cardinality based on uniqueness ratios.
+    
+    Returns:
+        tuple: (left_cardinality, right_cardinality) where values can be:
+               "*" (many), "1" (one), "?" (zero or one), "+" (one or more)
+    
+    Note:
+        Only trusts uniqueness heuristics when we have sufficient sample size (>= 50)
+        to avoid false positives. With small samples (e.g., 10 rows), a fact table's
+        foreign key can appear 100% unique by chance, leading to incorrect 1:1 inference.
+    """
+    # RULE 1: Trust explicit primary key metadata (highest priority)
+    if right_is_pk and not left_is_pk:
+        return ("*", "1")
+    
+    if left_is_pk and not right_is_pk:
+        return ("1", "*")
+    
+    if left_is_pk and right_is_pk:
+        return ("1", "1")
+    
+    # RULE 2: Only use uniqueness heuristics with sufficient sample size
+    # Require at least 50 samples to trust uniqueness ratios
+    MIN_SAMPLE_SIZE = 50
+    
+    if left_values and right_values:
+        sample_size = min(len(left_values), len(right_values))
+        
+        # Small sample warning: fall back to safe default
+        if sample_size < MIN_SAMPLE_SIZE:
+            # Conservative default: assume many-to-one (most common pattern)
+            # This prevents false 1:1 inference from small samples
+            return ("*", "1")
+        
+        # Large enough sample: trust uniqueness ratios
+        left_unique_ratio = len(set(left_values)) / len(left_values) if left_values else 0
+        right_unique_ratio = len(set(right_values)) / len(right_values) if right_values else 0
+        
+        # High uniqueness (>0.95) suggests the column could be a key
+        left_is_unique = left_unique_ratio > 0.95
+        right_is_unique = right_unique_ratio > 0.95
+        
+        if left_is_unique and right_is_unique:
+            return ("1", "1")
+        elif right_is_unique:
+            return ("*", "1")
+        elif left_is_unique:
+            return ("1", "*")
+    
+    # RULE 3: Default to many-to-one (most common case in data warehouses)
+    return ("*", "1")
+
+
+def _is_nullish(value: Any) -> bool:
+    """
+    Determines whether a sampled value should be treated as NULL/empty.
+    Handles common ClickZetta sampling formats where NULL becomes NaN or an empty string.
+    """
+    if value is None:
+        return True
+    if isinstance(value, float) and math.isnan(value):
+        return True
+    text = str(value).strip()
+    if not text:
+        return True
+    normalized = text.upper()
+    return normalized in {"NULL", "NONE", "NAN", "NA", "N/A", "NOT AVAILABLE"}
+
+
+def _column_has_null_via_query(
+    session: Session,
+    fqn: data_types.FQNParts,
+    column_name: str,
+    cache: Dict[Tuple[str, str, str, str], bool],
+) -> bool:
+    """
+    Executes a targeted IS NULL query to conclusively detect nullable foreign keys.
+    Results are cached per table/column to avoid redundant lookups.
+    """
+    key = (
+        (fqn.database or "").upper(),
+        (fqn.schema_name or "").upper(),
+        (fqn.table or "").upper(),
+        column_name.upper(),
+    )
+    if key in cache:
+        return cache[key]
+
+    if not column_name:
+        cache[key] = False
+        return False
+
+    qualified_table = _qualified_table_name(fqn)
+    column_identifier = _format_sql_identifier(column_name)
+    if not column_identifier or not qualified_table:
+        cache[key] = False
+        return False
+
+    query = (
+        f"SELECT {column_identifier} FROM {qualified_table} "
+        f"WHERE {column_identifier} IS NULL LIMIT 1"
+    )
+
+    try:
+        df = session.sql(query).to_pandas()
+        has_null = not df.empty
+    except Exception as exc:  # pragma: no cover - best-effort diagnostic query
+        logger.debug(
+            "Strict null check query failed for %s.%s.%s.%s: %s",
+            fqn.database,
+            fqn.schema_name,
+            fqn.table,
+            column_name,
+            exc,
+        )
+        has_null = False
+
+    cache[key] = has_null
+    return has_null
+
+
+def _infer_join_type(
+    left_table: str,
+    right_table: str,
+    left_card: str,
+    right_card: str,
+    left_is_pk: bool,
+    right_is_pk: bool,
+    left_values: List[str],
+    right_values: List[str],
+    *,
+    has_null_fk: bool = False,
+) -> int:
+    """
+    Infer the appropriate JOIN type for a relationship.
+    
+    Args:
+        left_table: Name of the left table
+        right_table: Name of the right table
+        left_card: Left cardinality ("1", "*", etc.)
+        right_card: Right cardinality ("1", "*", etc.)
+        left_is_pk: Whether left column is a primary key
+        right_is_pk: Whether right column is a primary key
+        left_values: Sample values from left column
+        right_values: Sample values from right column
+    
+    Returns:
+        semantic_model_pb2.JoinType value (inner or left_outer)
+    
+    Decision Logic:
+        1. INNER JOIN (default): When both sides have matching records
+           - Standard FK → PK relationships
+           - Both sides are required (e.g., orders must have customers)
+        
+        2. LEFT OUTER JOIN: When left side may have orphaned records
+           - Nullable foreign keys (detected via NULL sample values)
+           - Optional relationships (e.g., orders.promo_code → promotions.code)
+           - Fact → Dimension with potential missing dimensions
+    
+    Note:
+        - RIGHT OUTER and FULL OUTER are deprecated and not used
+        - We prefer LEFT OUTER over RIGHT OUTER for readability
+        - INNER JOIN is the safe default for data integrity
+    """
+    
+    # RULE 1: Default to INNER JOIN (most common and safest)
+    # Ensures referential integrity and matches standard data warehouse practice
+    default_join = semantic_model_pb2.JoinType.inner
+    
+    # RULE 2: Strict mode override - explicit null detection via SQL
+    if has_null_fk:
+        reason = "strict null probe"
+        logger.debug(
+            f"Join type inference for {left_table} -> {right_table}: "
+            f"LEFT_OUTER ({reason})"
+        )
+        return semantic_model_pb2.JoinType.left_outer
+
+    # RULE 3: Check for NULL values in foreign key (left side) using samples
+    # NULL values indicate optional relationships → use LEFT OUTER
+    if left_values and left_card in ("*", "+"):
+        sample_window = left_values[: min(len(left_values), 25)]
+        has_nulls = any(_is_nullish(val) for val in sample_window)
+        if has_nulls:
+            logger.debug(
+                f"Join type inference for {left_table} -> {right_table}: "
+                f"LEFT_OUTER (detected NULL values in FK column)"
+            )
+            return semantic_model_pb2.JoinType.left_outer
+    
+    # RULE 4: Heuristic - Look for "optional" naming patterns
+    # Tables/columns with "optional", "alternate", "secondary" suggest LEFT OUTER
+    left_upper = left_table.upper()
+    right_upper = right_table.upper()
+    optional_keywords = {
+        "OPTIONAL", "ALTERNATE", "SECONDARY", "BACKUP", "FALLBACK",
+        "PROMO", "PROMOTION", "DISCOUNT", "COUPON",  # Often optional
+    }
+    
+    for keyword in optional_keywords:
+        if keyword in right_upper:
+            logger.debug(
+                f"Join type inference for {left_table} -> {right_table}: "
+                f"LEFT_OUTER (optional relationship pattern: {keyword})"
+            )
+            return semantic_model_pb2.JoinType.left_outer
+    
+    # RULE 5: Many-to-One where dimension might be incomplete
+    # Example: FACT_SALES → DIM_PRODUCT (some products might not exist yet)
+    # However, this is risky - default to INNER for data quality
+    # Users can manually override if needed
+    
+    # RULE 6: Default to INNER JOIN
+    # Most conservative and ensures data integrity
+    logger.debug(
+        f"Join type inference for {left_table} -> {right_table}: "
+        f"INNER (default - ensures referential integrity)"
+    )
+    return default_join
+
+
+def _looks_like_foreign_key(fk_table: str, pk_table: str, fk_column: str) -> bool:
+    """
+    Enhanced heuristic to detect if a column looks like a foreign key.
+    Checks patterns like: customer_id, cust_id, customer_key, etc.
+    """
+    fk_upper = fk_column.strip().upper()
+    pk_table_variants = _table_variants(pk_table)
+    
+    # Pattern 1: {table_name}_id or {table_name}_key
+    for variant in pk_table_variants:
+        if fk_upper in {f"{variant}_ID", f"{variant}ID", f"{variant}_KEY", f"{variant}KEY"}:
+            return True
+    
+    # Pattern 2: Column ends with table name variants
+    tokens = _identifier_tokens(fk_column)
+    if len(tokens) >= 2:
+        # e.g., order_customer_id -> check if CUSTOMER is in pk_table_variants
+        for i in range(len(tokens) - 1):
+            if tokens[i] in pk_table_variants:
+                tail = tokens[-1]
+                if tail in {"ID", "KEY"}:
+                    return True
+    
+    # Pattern 3: Similar to primary key column but with FK table prefix
+    # e.g., order_id in order_items table referencing orders.id
+    fk_table_variants = _table_variants(fk_table)
+    for fk_variant in fk_table_variants:
+        if fk_upper.startswith(fk_variant):
+            remainder = fk_upper[len(fk_variant):].lstrip("_")
+            for pk_variant in pk_table_variants:
+                if remainder.startswith(pk_variant):
+                    return True
+    
+    return False
+
+
 def _suggest_filters(raw_table: data_types.Table) -> List[semantic_model_pb2.NamedFilter]:
     suggestions: List[semantic_model_pb2.NamedFilter] = []
     for col in raw_table.columns:
@@ -395,7 +733,10 @@ def _suggest_filters(raw_table: data_types.Table) -> List[semantic_model_pb2.Nam
 
 
 def _infer_relationships(
-    raw_tables: List[tuple[data_types.FQNParts, data_types.Table]]
+    raw_tables: List[tuple[data_types.FQNParts, data_types.Table]],
+    *,
+    session: Optional[Session] = None,
+    strict_join_inference: bool = False,
 ) -> List[semantic_model_pb2.Relationship]:
     relationships: List[semantic_model_pb2.Relationship] = []
     if not raw_tables:
@@ -453,6 +794,7 @@ def _infer_relationships(
         }
 
     pairs: dict[tuple[str, str], List[tuple[str, str]]] = {}
+    null_check_cache: Dict[Tuple[str, str, str, str], bool] = {}
 
     def _record_pair(left_table: str, right_table: str, left_col: str, right_col: str) -> None:
         key = (left_table, right_table)
@@ -508,7 +850,8 @@ def _infer_relationships(
                             meta_a["names"][0],
                         )
 
-            # Suffix-based matches (e.g. order_date_id -> date_id)
+            # Enhanced suffix-based matches with name similarity
+            # Pattern 1: Direct suffix match (e.g. order_date_id -> date_id)
             for pk_norm, pk_cols in table_a["pk_candidates"].items():
                 pk_meta = table_a["columns"].get(pk_norm)
                 if not pk_meta:
@@ -518,6 +861,8 @@ def _infer_relationships(
                         continue
                     if norm_b == pk_norm:
                         continue
+                    
+                    # Direct suffix match
                     if norm_b.endswith(pk_norm):
                         _record_pair(
                             table_b_name,
@@ -525,7 +870,21 @@ def _infer_relationships(
                             meta_b["names"][0],
                             pk_cols[0],
                         )
+                        continue
+                    
+                    # Enhanced: Check if column looks like a foreign key to this table
+                    if _looks_like_foreign_key(table_b_name, table_a_name, meta_b["names"][0]):
+                        # Additional check: name similarity
+                        similarity = _name_similarity(norm_b, pk_norm)
+                        if similarity >= 0.6:  # Configurable threshold
+                            _record_pair(
+                                table_b_name,
+                                table_a_name,
+                                meta_b["names"][0],
+                                pk_cols[0],
+                            )
 
+            # Pattern 2: Reverse direction
             for pk_norm, pk_cols in table_b["pk_candidates"].items():
                 pk_meta = table_b["columns"].get(pk_norm)
                 if not pk_meta:
@@ -535,6 +894,8 @@ def _infer_relationships(
                         continue
                     if norm_a == pk_norm:
                         continue
+                    
+                    # Direct suffix match
                     if norm_a.endswith(pk_norm):
                         _record_pair(
                             table_a_name,
@@ -542,14 +903,119 @@ def _infer_relationships(
                             meta_a["names"][0],
                             pk_cols[0],
                         )
+                        continue
+                    
+                    # Enhanced: Check if column looks like a foreign key to this table
+                    if _looks_like_foreign_key(table_a_name, table_b_name, meta_a["names"][0]):
+                        # Additional check: name similarity
+                        similarity = _name_similarity(norm_a, pk_norm)
+                        if similarity >= 0.6:  # Configurable threshold
+                            _record_pair(
+                                table_a_name,
+                                table_b_name,
+                                meta_a["names"][0],
+                                pk_cols[0],
+                            )
 
+    # Build relationships with inferred cardinality
     for (left_table, right_table), column_pairs in pairs.items():
+        # Infer cardinality based on available metadata
+        left_meta = metadata[left_table]
+        right_meta = metadata[right_table]
+        
+        # Determine if tables have primary keys in the relationship
+        left_has_pk = any(
+            col_name in [pair[0] for pair in column_pairs]
+            for pk_list in left_meta["pk_candidates"].values()
+            for col_name in pk_list
+        )
+        right_has_pk = any(
+            col_name in [pair[1] for pair in column_pairs]
+            for pk_list in right_meta["pk_candidates"].values()
+            for col_name in pk_list
+        )
+        
+        # Get sample values for cardinality inference
+        left_values = []
+        right_values = []
+        if column_pairs:
+            first_pair = column_pairs[0]
+            left_col_key = _sanitize_identifier_name(
+                first_pair[0],
+                prefixes_to_drop=global_prefixes | _table_prefixes(left_table)
+            )
+            right_col_key = _sanitize_identifier_name(
+                first_pair[1],
+                prefixes_to_drop=global_prefixes | _table_prefixes(right_table)
+            )
+            
+            if left_col_key in left_meta["columns"]:
+                left_values = left_meta["columns"][left_col_key].get("values") or []
+            if right_col_key in right_meta["columns"]:
+                right_values = right_meta["columns"][right_col_key].get("values") or []
+        
+        # Infer cardinality (returns tuple like ("*", "1"))
+        left_card, right_card = _infer_cardinality(
+            left_values,
+            right_values,
+            left_has_pk,
+            right_has_pk,
+        )
+        
+        # Determine if SQL null probe should be executed for stricter inference
+        strict_fk_detected = False
+        if strict_join_inference and session:
+            left_fqn_parts = left_meta.get("fqn")
+            if isinstance(left_fqn_parts, data_types.FQNParts):
+                strict_fk_detected = any(
+                    _column_has_null_via_query(
+                        session,
+                        left_fqn_parts,
+                        left_column,
+                        null_check_cache,
+                    )
+                    for left_column, _ in column_pairs
+                )
+
+        # Infer join type based on relationship characteristics
+        join_type = _infer_join_type(
+            left_table,
+            right_table,
+            left_card,
+            right_card,
+            left_has_pk,
+            right_has_pk,
+            left_values,
+            right_values,
+            has_null_fk=strict_fk_detected,
+        )
+        
+        # Log cardinality inference decision for debugging
+        sample_info = f"samples: L={len(left_values)}, R={len(right_values)}"
+        pk_info = f"PKs: L={left_has_pk}, R={right_has_pk}"
+        join_type_name = "INNER" if join_type == semantic_model_pb2.JoinType.inner else "LEFT_OUTER"
+        logger.debug(
+            f"Relationship inference for {left_table} -> {right_table}: "
+            f"{left_card}:{right_card}, JOIN={join_type_name} ({sample_info}, {pk_info})"
+        )
+        
+        # Determine relationship type based on cardinality
+        if left_card == "1" and right_card == "1":
+            rel_type = semantic_model_pb2.RelationshipType.one_to_one
+        elif left_card in ("*", "+") and right_card == "1":
+            rel_type = semantic_model_pb2.RelationshipType.many_to_one
+        elif left_card == "1" and right_card in ("*", "+"):
+            rel_type = semantic_model_pb2.RelationshipType.one_to_many
+        else:
+            # Default to many_to_one for backward compatibility
+            rel_type = semantic_model_pb2.RelationshipType.many_to_one
+        
         relationship = semantic_model_pb2.Relationship(
             name=f"{left_table}_to_{right_table}",
             left_table=left_table,
             right_table=right_table,
-            join_type=semantic_model_pb2.JoinType.inner,
-            relationship_type=semantic_model_pb2.RelationshipType.many_to_one,
+            join_type=join_type,  # Use inferred join type instead of hardcoded inner
+            relationship_type=rel_type,
         )
         for left_column, right_column in column_pairs:
             relationship.relationship_columns.append(
@@ -558,6 +1024,8 @@ def _infer_relationships(
                 )
             )
         relationships.append(relationship)
+    
+    logger.info(f"Inferred {len(relationships)} relationships across {len(raw_tables)} tables")
     return relationships
 
 
@@ -719,6 +1187,8 @@ def raw_schema_to_semantic_context(
     conn: Session,
     n_sample_values: int = _DEFAULT_N_SAMPLE_VALUES_PER_COL,
     allow_joins: Optional[bool] = True,
+    strict_join_inference: bool = False,
+    llm_custom_prompt: str = "",
     enrich_with_llm: bool = False,
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> semantic_model_pb2.SemanticModel:
@@ -730,6 +1200,9 @@ def raw_schema_to_semantic_context(
     - semantic_model_name (str): A meaningful semantic model name.
     - conn (Session): ClickZetta session to reuse.
     - n_sample_values (int): The number of sample values per col.
+    - allow_joins (bool | None): Whether to infer table relationships.
+    - strict_join_inference (bool): If True, runs additional `IS NULL` probes per relationship to tighten join-type detection (requires extra SQL queries).
+    - llm_custom_prompt (str): Optional user instructions forwarded to the DashScope enrichment step.
 
     Returns:
     - The semantic model (semantic_model_pb2.SemanticModel).
@@ -806,7 +1279,11 @@ def raw_schema_to_semantic_context(
 
     relationships: List[semantic_model_pb2.Relationship] = []
     if allow_joins:
-        relationships = _infer_relationships(raw_tables_metadata)
+        relationships = _infer_relationships(
+            raw_tables_metadata,
+            session=conn if strict_join_inference else None,
+            strict_join_inference=strict_join_inference,
+        )
 
     context = semantic_model_pb2.SemanticModel(
         name=semantic_model_name,
@@ -841,6 +1318,7 @@ def raw_schema_to_semantic_context(
                 raw_tables_metadata,
                 client,
                 placeholder=_PLACEHOLDER_COMMENT,
+                custom_prompt=llm_custom_prompt,
             )
             _notify("DashScope enrichment complete.")
         else:
@@ -960,7 +1438,9 @@ def generate_model_str_from_clickzetta(
     conn: Session,
     n_sample_values: int = _DEFAULT_N_SAMPLE_VALUES_PER_COL,
     allow_joins: Optional[bool] = True,
+    strict_join_inference: bool = False,
     enrich_with_llm: bool = False,
+    llm_custom_prompt: str = "",
     progress_callback: Optional[Callable[[str], None]] = None,
 ) -> str:
     """
@@ -972,6 +1452,8 @@ def generate_model_str_from_clickzetta(
         conn: ClickZetta session to reuse.
         n_sample_values: The number of sample values to populate for all columns.
         allow_joins: Whether to allow joins in the semantic context.
+        strict_join_inference: When True, executes additional null-probe SQL queries to improve join type accuracy.
+        llm_custom_prompt: Optional user instructions forwarded to the DashScope enrichment step.
         progress_callback: Optional callable invoked with human-readable progress updates.
 
     Returns:
@@ -993,6 +1475,8 @@ def generate_model_str_from_clickzetta(
         n_sample_values=n_sample_values if n_sample_values > 0 else 1,
         semantic_model_name=semantic_model_name,
         allow_joins=allow_joins,
+        strict_join_inference=strict_join_inference,
+        llm_custom_prompt=llm_custom_prompt,
         enrich_with_llm=enrich_with_llm,
         conn=conn,
         progress_callback=_notify,

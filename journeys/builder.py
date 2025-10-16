@@ -15,7 +15,7 @@ from app_utils.shared_utils import (
 from semantic_model_generator.llm import is_llm_available
 
 
-@st.experimental_dialog("Selecting your tables", width="large")
+@st.experimental_dialog("Selecting your tables to Create new Semantic Model", width="large")
 def table_selector_dialog() -> None:
     st.write(
         "Please fill out the following fields to start building your semantic model."
@@ -46,7 +46,16 @@ def table_selector_dialog() -> None:
         st.session_state["available_tables"] = []
     model_name = input_semantic_file_name()
     sample_values = input_sample_value_num()
-    st.markdown("")
+    strict_join_inference = st.checkbox(
+        "Strict join inference (extra SQL)",
+        value=st.session_state.get("strict_join_inference", False),
+        help=(
+            "Runs additional `IS NULL` queries for each inferred foreign key to confirm optional relationships. "
+            "Enabling this improves join type accuracy at the cost of extra metadata queries."
+        ),
+    )
+    st.session_state["strict_join_inference"] = strict_join_inference
+    # st.markdown("")
 
     with st.spinner("Loading databases..."):
         available_databases = get_available_databases()
@@ -98,7 +107,7 @@ def table_selector_dialog() -> None:
         format_func=lambda x: format_workspace_context(x, -1),
     )
 
-    st.markdown("<div style='margin: 240px;'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='margin: 40px;'></div>", unsafe_allow_html=True)
     experimental_features = st.checkbox(
         "Enable joins (optional)",
         help="Checking this box will enable you to add/edit join paths in your semantic model. If enabling this setting, please ensure that the required ClickZetta parameters are enabled for your workspace. Reach out to your account team for access.",
@@ -123,8 +132,19 @@ def table_selector_dialog() -> None:
         value=llm_available,
         disabled=not llm_available,
     )
-    if not llm_available:
-        llm_enrichment = False
+    llm_custom_prompt = ""
+    if llm_enrichment and llm_available:
+        default_prompt = st.session_state.get("llm_custom_prompt", "")
+        llm_custom_prompt = st.text_area(
+            "Optional prompt for DashScope",
+            value=default_prompt,
+            help="Provide custom instructions (English recommended) to tailor the enrichment output. Leave blank to use the default prompt only.",
+        )
+        st.session_state["llm_custom_prompt"] = llm_custom_prompt
+    else:
+        st.session_state["llm_custom_prompt"] = ""
+        if not llm_available:
+            llm_enrichment = False
     st.session_state["llm_enrichment"] = llm_enrichment
 
     submit = st.button("Submit", use_container_width=True, type="primary")
@@ -135,7 +155,9 @@ def table_selector_dialog() -> None:
                 sample_values,
                 st.session_state["selected_tables"],
                 allow_joins=experimental_features,
+                strict_join_inference=strict_join_inference,
                 enrich_with_llm=llm_enrichment,
+                llm_custom_prompt=st.session_state.get("llm_custom_prompt", ""),
             )
             st.session_state["table_selector_needs_reset"] = True
             st.session_state["page"] = GeneratorAppScreen.ITERATION

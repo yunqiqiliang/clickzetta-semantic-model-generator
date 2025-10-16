@@ -2,6 +2,58 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [0.1.34] - 2025-10-16
+
+### Bug Fixes
+
+- **[CRITICAL]** Fixed f-string syntax error in `_quote_identifier()` function.
+  - **Problem**: f-string expression contained backslashes (`return f'"{text.replace(\'"\', \'""\')}"'`), causing `SyntaxError: f-string expression part cannot include a backslash`.
+  - **Solution**: Extracted `.replace()` operation to external variable before f-string interpolation.
+  - **Impact**: Prevents module import failure and Streamlit application crash.
+  - See `FSTRING_SYNTAX_FIX.md` for details.
+
+### Major Bug Fix
+
+- **[CRITICAL]** Fixed cardinality inference regression that caused false one-to-one relationships in star/snowflake schemas.
+  - **Problem**: Small sample sizes (<50 rows) led to accidental uniqueness in fact table foreign keys, causing incorrect 1:1 inference instead of many-to-one.
+  - **Solution**: Added `MIN_SAMPLE_SIZE = 50` threshold; fall back to safe `many_to_one` default when sample is insufficient.
+  - **Impact**: Prevents query planner errors in ClickZetta workspaces without explicit primary key metadata.
+  - See `CARDINALITY_FIX_REPORT.md` for detailed analysis.
+
+### Performance Improvements
+
+- **Sampling controls exposed in UI**:
+  - Default sample count remains 10 rows (`_DEFAULT_N_SAMPLE_VALUES_PER_COL = 10`) to avoid YAML bloat.
+  - The Streamlit generator now offers a 10‑500 range so analysts can dial up sampling (50/100/200…) when higher confidence is required.
+  - Documentation clarifies how larger samples interact with the `MIN_SAMPLE_SIZE = 50` threshold.
+
+### Enhancements
+
+- **Phase 1 Relationship Inference Improvements**:
+  - Added Levenshtein distance-based fuzzy column name matching (threshold: 0.6).
+  - Enhanced foreign key pattern detection (supports `{table}_id`, `{table}_key`, abbreviated forms).
+  - Automatic relationship type inference (`one_to_one`, `many_to_one`, `one_to_many`) based on primary key metadata and uniqueness ratios.
+  - **NEW: Intelligent JOIN TYPE inference** (replaces hardcoded `INNER` join):
+    - Detects nullable foreign keys (NULL values) → `LEFT OUTER JOIN`
+    - Recognizes optional relationship patterns (promo, discount, alternate, etc.) → `LEFT OUTER JOIN`
+    - Defaults to `INNER JOIN` for standard FK relationships (ensures data integrity)
+    - See `JOIN_TYPE_INFERENCE.md` for detailed design documentation
+  - Added debug logging for cardinality and join type inference decisions.
+  - See `RELATIONSHIP_INFERENCE_IMPROVEMENTS.md` for full documentation.
+- **Strict join inference toggle**:
+  - Added `strict_join_inference` flag to `_infer_relationships` and exposed a “Strict join inference” checkbox in the Streamlit sidebar.
+  - When enabled, the generator issues targeted `WHERE <fk> IS NULL LIMIT 1` queries to conclusively detect optional relationships and emit `LEFT_OUTER` joins.
+  - Default remains disabled to avoid extra queries; documentation updated (`JOIN_TYPE_INFERENCE.md`, `NULL_DETECTION_EXPLAINED.md`).
+- **DashScope enrichment customization**:
+  - Table selector dialog now includes an optional prompt text area shown when enrichment is enabled.
+  - User-supplied guidance is appended to the DashScope prompt, enabling bespoke descriptions and business context.
+  - Back-end plumbing `run_generate_model_str_from_clickzetta` → `generate_model_str_from_clickzetta` → `enrich_semantic_model` now accepts `llm_custom_prompt`.
+
+### Testing
+
+- Added comprehensive test suite: `test_cardinality_standalone.py` (6/6 tests passing).
+- Verified boundary conditions (49 vs 50 samples), realistic fact→dimension scenarios, and edge cases.
+
 ## [0.1.33] - 2024-08-07
 
 ### Updates
