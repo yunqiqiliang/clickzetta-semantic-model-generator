@@ -1359,10 +1359,11 @@ def input_sample_value_num() -> int:
         int: The maximum number of sample values per column.
     """
 
+    sample_values_choices = list(range(1, 40))
     sample_values: int = st.selectbox(  # type: ignore
         "Maximum number of sample values per column",
-        list(range(1, 40)),
-        index=2,
+        sample_values_choices,
+        index=min(9, len(sample_values_choices) - 1),
         help="Specifies the maximum number of distinct sample values we fetch for each column. We suggest keeping this number as low as possible to reduce latency.",
     )
     return sample_values
