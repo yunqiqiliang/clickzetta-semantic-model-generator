@@ -480,15 +480,30 @@ def _fetch_columns_via_show(
         return pd.DataFrame()
 
     rows: List[pd.DataFrame] = []
-    catalog = workspace.upper()
-    schema = table_schema.upper() if table_schema else ""
+    category = _catalog_category(session, workspace)
+    is_shared_catalog = category == "SHARED"
+    catalog = workspace if is_shared_catalog else workspace.upper()
+    schema = (
+        table_schema or ""
+    )
+    if schema and not is_shared_catalog:
+        schema = schema.upper()
 
     for table_name in table_names:
         qualified_parts = [
-            part for part in (catalog, schema, table_name.upper()) if part
+            part
+            for part in (
+                catalog,
+                schema,
+                table_name.upper() if not is_shared_catalog else table_name,
+            )
+            if part
         ]
         qualified_table = ".".join(qualified_parts)
-        query = f"SHOW COLUMNS IN {qualified_table}"
+        if is_shared_catalog:
+            query = f"SHOW COLUMNS IN SHARE {qualified_table}"
+        else:
+            query = f"SHOW COLUMNS IN {qualified_table}"
         try:
             df = session.sql(query).to_pandas()
         except Exception as exc:
@@ -646,13 +661,25 @@ def fetch_tables_views_in_schema(
     parts = schema_name.split(".", maxsplit=1)
     workspace = parts[0]
     schema = parts[1] if len(parts) > 1 else ""
-    workspace_upper = workspace.upper()
-    schema_upper = schema.upper()
+    category = _catalog_category(session, workspace)
+    is_shared_catalog = category == "SHARED"
+
+    workspace_token = workspace if is_shared_catalog else workspace.upper()
+    schema_token = schema if is_shared_catalog else schema.upper()
 
     try:
-        if workspace_upper and schema_upper:
-            scope = join_quoted_identifiers(workspace_upper, schema_upper)
-            df = session.sql(f"SHOW TABLES IN {scope}").to_pandas()
+        if workspace_token and schema_token:
+            if is_shared_catalog:
+                scope = ".".join(
+                    part for part in (workspace_token, schema_token) if part
+                )
+                df = session.sql(f"SHOW TABLES IN SHARE {scope}").to_pandas()
+            else:
+                scope = join_quoted_identifiers(
+                    workspace_token,
+                    schema_token,
+                )
+                df = session.sql(f"SHOW TABLES IN {scope}").to_pandas()
         else:
             df = session.sql("SHOW TABLES").to_pandas()
     except Exception as exc:  # pragma: no cover
