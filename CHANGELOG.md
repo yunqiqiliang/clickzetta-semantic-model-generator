@@ -2,6 +2,28 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.4] - 2025-10-17
+
+### Enhancements
+
+- Added offline-friendly relationship discovery via `discover_relationships_from_table_definitions()`, enabling MCP `source_type="tables"` requests without a ClickZetta session.
+- Introduced runtime guardrails for large schemas (`max_relationships`, `max_tables`, `timeout_seconds`) and surfaced summary flags so clients can detect partial results.
+- Tightened relationship confidence scoring by penalising generic identifiers and raising the default confidence floor to 0.5, reducing false positives in wide schemas.
+- Extended detailed responses to include guardrail metadata and documentation updates so integrators know how to react to truncated runs.
+
+### Testing
+
+- `POETRY_CACHE_DIR=.poetry-cache poetry run pytest -q`
+
+## [1.0.3] - 2025-10-17
+
+### Compatibility
+
+- Relaxed dependency pins so the package remains compatible when newer ClickZetta connectors or ingestion utilities pull in updated stacks.
+  - `clickzetta-connector-python` now accepts any `<0.9` release newer than `0.8.92`.
+  - `numpy` requirement extended to support the 2.x line; `urllib3` bumped to allow 2.x as well.
+  - Regenerated `poetry.lock` to capture the wider constraints.
+
 ## [0.1.34] - 2025-10-16
 
 ### Bug Fixes
@@ -40,6 +62,10 @@ You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to p
     - See `JOIN_TYPE_INFERENCE.md` for detailed design documentation
   - Added debug logging for cardinality and join type inference decisions.
   - See `RELATIONSHIP_INFERENCE_IMPROVEMENTS.md` for full documentation.
+- **Relationship discovery tooling refresh**:
+  - Introduced `discover_relationships_from_table_definitions()` to accept offline table metadata (`source_type="tables"`) without needing a ClickZetta session.
+  - Added execution guardrails (`max_relationships`, `timeout_seconds`, `max_tables`) and surfaced summary flags (`limited_by_timeout`, `limited_by_max_relationships`, `limited_by_table_cap`) for large schemas.
+  - Tightened inference heuristics by penalising generic identifiers (`id`, `name`, `code`) and increasing the default confidence threshold to 0.5, significantly reducing false-positive joins.
 - **Strict join inference toggle**:
   - Added `strict_join_inference` flag to `_infer_relationships` and exposed a “Strict join inference” checkbox in the Streamlit sidebar.
   - When enabled, the generator issues targeted `WHERE <fk> IS NULL LIMIT 1` queries to conclusively detect optional relationships and emit `LEFT_OUTER` joins.

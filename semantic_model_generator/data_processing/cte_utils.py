@@ -8,15 +8,37 @@ import sqlglot.expressions
 from loguru import logger
 from sqlglot import Dialect
 
-from semantic_model_generator.protos import semantic_model_pb2
 from semantic_model_generator.clickzetta_utils.clickzetta_connector import (
     OBJECT_DATATYPES,
 )
+from semantic_model_generator.clickzetta_utils.utils import (
+    join_quoted_identifiers,
+    normalize_identifier,
+)
+from semantic_model_generator.protos import semantic_model_pb2
 
 _SQLGLOT_CLICKZETTA_KEY = "".join(["snow", "flake"])
 ClickzettaDialect = Dialect.get_or_raise(_SQLGLOT_CLICKZETTA_KEY)
 
 _LOGICAL_TABLE_PREFIX = "__"
+_SQLGLOT_QUOTE_CHAR = '"'
+
+
+def _prepare_sql_for_parsing(sql: str) -> str:
+    """
+    Converts backtick-quoted identifiers to double quotes for SQLGlot parsing.
+    """
+
+    return sql.replace("`", _SQLGLOT_QUOTE_CHAR)
+
+
+def _render_clickzetta_sql(expression: sqlglot.Expression, *, pretty: bool = False) -> str:
+    """
+    Renders a SQLGlot expression using ClickZetta dialect and rewrites identifiers with backticks.
+    """
+
+    rendered = expression.sql(dialect=ClickzettaDialect, pretty=pretty)
+    return rendered.replace(_SQLGLOT_QUOTE_CHAR, "`")
 
 
 def is_logical_table(table_name: str) -> bool:
@@ -33,12 +55,12 @@ def logical_table_name(table: semantic_model_pb2.Table) -> str:
 
 def fully_qualified_table_name(table: semantic_model_pb2.FullyQualifiedTable) -> str:
     """Returns fully qualified table name such as my_db.my_schema.my_table"""
-    fqn = table.table
-    if len(table.schema) > 0:
-        fqn = f"{table.schema}.{fqn}"
-    if len(table.database) > 0:
-        fqn = f"{table.database}.{fqn}"
-    return fqn  # type: ignore[no-any-return]
+    parts = [
+        normalize_identifier(component)
+        for component in (table.database, table.schema, table.table)
+        if component
+    ]
+    return join_quoted_identifiers(*parts)  # type: ignore[no-any-return]
 
 
 def is_aggregation_expr(col: semantic_model_pb2.Column) -> bool:
@@ -156,8 +178,8 @@ def _generate_cte_for(
         cte = f"WITH {logical_table_name(table)} AS (\n"
         cte += "SELECT \n"
         cte += ",\n".join(expr_columns) + "\n"
-        cte += f"FROM {fully_qualified_table_name(table.base_table)}"
-        cte += ")"
+        cte += f"FROM {fully_qualified_table_name(table.base_table)}\n"
+        cte += ")\n"
         return cte
 
 
@@ -261,13 +283,15 @@ def _convert_to_clickzetta_sql(sql: str) -> str:
     str: The SQL statement in ClickZetta syntax.
     """
     try:
-        expression = sqlglot.parse_one(sql, dialect=ClickzettaDialect)
+        expression = sqlglot.parse_one(
+            _prepare_sql_for_parsing(sql), dialect=ClickzettaDialect
+        )
     except Exception as e:
         raise ValueError(
             f"Unable to parse sql statement.\n Provided sql: {sql}\n. Error: {e}"
         )
 
-    return expression.sql(dialect=ClickzettaDialect)
+    return _render_clickzetta_sql(expression)
 
 
 def generate_select(
@@ -332,12 +356,16 @@ def expand_all_logical_tables_as_ctes(
     for cte in ctes:
         new_withs.append(
             sqlglot.parse_one(
-                cte, read=ClickzettaDialect, into=sqlglot.expressions.With
+                _prepare_sql_for_parsing(cte),
+                read=ClickzettaDialect,
+                into=sqlglot.expressions.With,
             )
         )
 
     # Step 3: Prefix the CTEs to the original query.
-    ast = sqlglot.parse_one(sql_query, read=ClickzettaDialect)
+    ast = sqlglot.parse_one(
+        _prepare_sql_for_parsing(sql_query), read=ClickzettaDialect
+    )
     with_ = ast.args.get("with")
     # If the query doesn't have a WITH clause, then generate one.
     if with_ is None:
@@ -349,7 +377,9 @@ def expand_all_logical_tables_as_ctes(
     else:
         new_ctes = [w.expressions[0] for w in new_withs]
         with_.set("expressions", new_ctes + with_.expressions)
-    return ast.sql(dialect=ClickzettaDialect, pretty=True)  # type: ignore [no-any-return]
+    return _render_clickzetta_sql(
+        ast, pretty=True
+    )  # type: ignore [no-any-return]
 
 
 def context_to_column_format(

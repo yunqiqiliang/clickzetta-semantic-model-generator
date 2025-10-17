@@ -4900,4 +4900,4 @@ looker = ["looker-sdk"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.9,<3.9.7 || >3.9.7,<3.12"
-content-hash = "6acaade89d2c3f8623ba9ac18656a79f113cf0f3459db337016ee9db9275e7aa"
+content-hash = "8b996e52f8ff70538ab3476fb171147f757388720acb90e528b69eccbaee6935"

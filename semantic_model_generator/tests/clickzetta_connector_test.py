@@ -3,15 +3,13 @@ from unittest import mock
 
 import pandas as pd
 
-from semantic_model_generator.clickzetta_utils import env_vars
 from semantic_model_generator.clickzetta_utils import clickzetta_connector as connector
+from semantic_model_generator.clickzetta_utils import env_vars
 
 
 def test_fetch_stages_includes_user_volume(monkeypatch):
     data = pd.DataFrame({"name": ["shared_stage"]})
-    with mock.patch.object(
-        connector, "_execute_query_to_pandas", return_value=data
-    ):
+    with mock.patch.object(connector, "_execute_query_to_pandas", return_value=data):
         stages = connector.fetch_stages_in_schema(
             connection=mock.MagicMock(), schema_name="WORKSPACE.SCHEMA"
         )
@@ -29,9 +27,7 @@ def test_fetch_yaml_names_in_user_volume(monkeypatch):
             ]
         }
     )
-    with mock.patch.object(
-        connector, "_execute_query_to_pandas", return_value=data
-    ):
+    with mock.patch.object(connector, "_execute_query_to_pandas", return_value=data):
         files = connector.fetch_yaml_names_in_stage(
             connection=mock.MagicMock(),
             stage="volume:user://~/semantic_models/",

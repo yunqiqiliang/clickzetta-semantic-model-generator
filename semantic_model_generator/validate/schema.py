@@ -22,9 +22,9 @@ from strictyaml import (
     YAMLValidationError,
 )
 
+from semantic_model_generator.data_processing.cte_utils import ClickzettaDialect
 from semantic_model_generator.protos import semantic_model_pb2
 from semantic_model_generator.validate.keywords import CZ_RESERVED_WORDS
-from semantic_model_generator.data_processing.cte_utils import ClickzettaDialect
 
 scalar_type_map = {
     FieldDescriptor.TYPE_BOOL: Bool,
@@ -53,7 +53,9 @@ class IdField(Str):  # type: ignore
                 "name can only contain letters, underscores, decimal digits (0-9), and dollar signs ($).",
             )
         if chunk.contents.upper() in CZ_RESERVED_WORDS:
-            chunk.expecting_but_found("", "name cannot be a ClickZetta reserved keyword")
+            chunk.expecting_but_found(
+                "", "name cannot be a ClickZetta reserved keyword"
+            )
         return chunk.contents
 
 

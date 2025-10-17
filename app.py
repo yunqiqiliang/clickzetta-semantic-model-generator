@@ -7,12 +7,12 @@ st.set_page_config(layout="wide", page_icon="💬", page_title="Semantic Model G
 
 from app_utils.shared_utils import (  # noqa: E402
     GeneratorAppScreen,
-    render_sidebar_title,
     get_clickzetta_connection,
+    render_sidebar_title,
     set_account_name,
+    set_clickzetta_session,
     set_host_name,
     set_sit_query_tag,
-    set_clickzetta_session,
     set_streamlit_location,
     set_user_name,
 )
@@ -45,12 +45,11 @@ def verify_environment_setup():
 
     # Instantiate the ClickZetta connection that gets reused throughout the app.
     try:
-        with st.spinner(
-            "Validating your connection to ClickZetta."
-        ):
+        with st.spinner("Validating your connection to ClickZetta."):
             return get_clickzetta_connection()
     except Exception:
         failed_connection_popup()
+
 
 @st.experimental_dialog("ClickZetta Semantic Model specification", width="large")
 def show_semantic_spec() -> None:
@@ -80,14 +79,18 @@ def show_semantic_examples() -> None:
         return
 
     example_files = sorted(
-        file for file in EXAMPLES_DIR.iterdir() if file.suffix.lower() in {".yaml", ".yml"}
+        file
+        for file in EXAMPLES_DIR.iterdir()
+        if file.suffix.lower() in {".yaml", ".yml"}
     )
     if not example_files:
         st.info("No example semantic model files are currently available.")
         return
 
     options = {file.name: file for file in example_files}
-    selected_name = st.selectbox("Choose an example to review", options=list(options.keys()))
+    selected_name = st.selectbox(
+        "Choose an example to review", options=list(options.keys())
+    )
 
     if selected_name:
         example_path = options[selected_name]
@@ -99,6 +102,7 @@ def show_semantic_examples() -> None:
 
         with st.expander("YAML preview", expanded=True):
             st.code(content, language="yaml")
+
 
 if __name__ == "__main__":
     from journeys import builder, iteration, partner

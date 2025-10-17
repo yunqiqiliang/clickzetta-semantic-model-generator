@@ -3,6 +3,7 @@ from typing import Any, Optional, Union
 import pandas as pd
 import streamlit as st
 import yaml
+
 from app_utils.shared_utils import (
     ProgrammingError,
     StorageTarget,
@@ -62,7 +63,9 @@ def upload_dbt_semantic() -> None:
                     include_yml=True,
                 )
             except (ValueError, ProgrammingError):
-                st.error("Insufficient permissions to read from the selected storage target.")
+                st.error(
+                    "Insufficient permissions to read from the selected storage target."
+                )
                 st.stop()
 
         stage_files = st.multiselect("Volume/stage files", options=available_files)
@@ -77,9 +80,7 @@ def upload_dbt_semantic() -> None:
                         stage_schema=st.session_state.get(
                             "selected_iteration_schema", ""
                         ),
-                        stage_name=st.session_state.get(
-                            "selected_iteration_stage", ""
-                        ),
+                        stage_name=st.session_state.get("selected_iteration_stage", ""),
                     )
                 file_content = download_yaml(
                     staged_file,

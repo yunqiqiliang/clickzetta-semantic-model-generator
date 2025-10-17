@@ -4,10 +4,11 @@ import pytest
 import sqlglot
 
 from semantic_model_generator.data_processing.cte_utils import (
+    ClickzettaDialect,
+    _prepare_sql_for_parsing,
     _enrich_column_in_expr_with_aggregation,
     _get_col_expr,
     _validate_col,
-    ClickzettaDialect,
     context_to_column_format,
     expand_all_logical_tables_as_ctes,
     generate_select,
@@ -304,7 +305,7 @@ class SemanticModelTest(TestCase):
         col_format_tbl = get_test_table_col_format()
         got = generate_select(col_format_tbl, 100)
         want = [
-            "WITH __t1 AS (SELECT d1_expr AS d1, d2_expr AS d2 FROM db.sc.t1) SELECT * FROM __t1 LIMIT 100"
+            "WITH __t1 AS (SELECT d1_expr AS d1, d2_expr AS d2 FROM `db`.`sc`.`t1`) SELECT * FROM __t1 LIMIT 100"
         ]
         assert got == want
 
@@ -312,8 +313,8 @@ class SemanticModelTest(TestCase):
         col_format_tbl = get_test_table_col_format_w_agg()
         got = generate_select(col_format_tbl, 100)
         want = [
-            "WITH __t1 AS (SELECT SUM(d2) AS d2_total FROM db.sc.t1) SELECT * FROM __t1 LIMIT 100",
-            "WITH __t1 AS (SELECT d1_expr AS d1, SUM(d3) OVER (PARTITION BY d1) AS d3 FROM db.sc.t1) SELECT * FROM __t1 LIMIT 100",
+            "WITH __t1 AS (SELECT SUM(d2) AS d2_total FROM `db`.`sc`.`t1`) SELECT * FROM __t1 LIMIT 100",
+            "WITH __t1 AS (SELECT d1_expr AS d1, SUM(d3) OVER (PARTITION BY d1) AS d3 FROM `db`.`sc`.`t1`) SELECT * FROM __t1 LIMIT 100",
         ]
         assert sorted(got) == sorted(want)
 
@@ -321,7 +322,7 @@ class SemanticModelTest(TestCase):
         col_format_tbl = get_test_table_col_format_w_agg_only()
         got = generate_select(col_format_tbl, 100)
         want = [
-            "WITH __t1 AS (SELECT SUM(d2) AS d2_total FROM db.sc.t1) SELECT * FROM __t1 LIMIT 100"
+            "WITH __t1 AS (SELECT SUM(d2) AS d2_total FROM `db`.`sc`.`t1`) SELECT * FROM __t1 LIMIT 100"
         ]
         assert sorted(got) == sorted(want)
 
@@ -437,21 +438,21 @@ class SemanticModelTest(TestCase):
         want = """WITH __t1 AS (SELECT
     d1_expr AS d1,
     d2_expr AS d2
-  FROM db.sc.t1
+  FROM `db`.`sc`.`t1`
 ), __t2 AS (
   SELECT
     td1_expr AS td1,
     m1_expr AS m1,
     m1_expr AS m2,
     m3_expr
-  FROM db.sc.t2
+  FROM `db`.`sc`.`t2`
 )
 SELECT
   *
 FROM __t2"""
-        assert sqlglot.parse_one(want, ClickzettaDialect) == sqlglot.parse_one(
-            got, ClickzettaDialect
-        )
+        assert sqlglot.parse_one(
+            _prepare_sql_for_parsing(want), ClickzettaDialect
+        ) == sqlglot.parse_one(_prepare_sql_for_parsing(got), ClickzettaDialect)
 
     def test_expand_all_logical_tables_as_ctes_with_column_renaming(self) -> None:
         ctx = semantic_model_pb2.SemanticModel(
@@ -465,12 +466,12 @@ FROM __t2"""
     clcks AS clicks,
     clcks,
     cst
-  FROM db.sc.t1
+  FROM `db`.`sc`.`t1`
 )
 SELECT
   *
 FROM __t1
         """
-        assert sqlglot.parse_one(want, ClickzettaDialect) == sqlglot.parse_one(
-            got, ClickzettaDialect
-        )
+        assert sqlglot.parse_one(
+            _prepare_sql_for_parsing(want), ClickzettaDialect
+        ) == sqlglot.parse_one(_prepare_sql_for_parsing(got), ClickzettaDialect)

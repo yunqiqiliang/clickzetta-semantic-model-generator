@@ -5,39 +5,38 @@ from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 import sqlglot
 import streamlit as st
+from loguru import logger
 from streamlit import config
 from streamlit.delta_generator import DeltaGenerator
 from streamlit_extras.stylable_container import stylable_container
-from loguru import logger
 
 from app_utils.chat import send_message
 from app_utils.shared_utils import (
+    AppMetadata,
+    ClickzettaConnection,
     GeneratorAppScreen,
     ProgrammingError,
-    ClickzettaConnection,
     StorageTarget,
-    AppMetadata,
-    stage_exists,
     changed_from_last_validated_model,
+    delete_yaml,
     download_yaml,
     get_clickzetta_connection,
     get_yamls_from_stage,
     init_session_states,
+    render_sidebar_title,
     return_home_button,
     stage_selector_container,
     upload_yaml,
-    delete_yaml,
     validate_and_upload_tmp_yaml,
-    render_sidebar_title,
 )
 from journeys.evaluation import evaluation_mode_show
 from journeys.joins import joins_dialog
 from semantic_model_generator.data_processing.cte_utils import (
+    ClickzettaDialect,
     context_to_column_format,
     expand_all_logical_tables_as_ctes,
     logical_table_name,
     remove_ltable_cte,
-    ClickzettaDialect,
 )
 from semantic_model_generator.data_processing.proto_utils import (
     proto_to_yaml,
@@ -90,7 +89,9 @@ def qualify_sql_with_semantic_context(
     try:
         expression = sqlglot.parse_one(sql, dialect=ClickzettaDialect)
     except Exception as exc:
-        logger.debug("Unable to parse SQL for qualification ({}). Keeping original SQL.", exc)
+        logger.debug(
+            "Unable to parse SQL for qualification ({}). Keeping original SQL.", exc
+        )
         return sql
 
     def _update_table(node: sqlglot.exp.Expression) -> bool:
@@ -464,9 +465,7 @@ def chat_and_edit_vqr(_conn: ClickzettaConnection) -> None:
         if is_validated
         else "Please validate your semantic model before chatting."
     )
-    if user_input := st.chat_input(
-        chat_placeholder, disabled=not is_validated
-    ):
+    if user_input := st.chat_input(chat_placeholder, disabled=not is_validated):
         with messages:
             process_message(_conn=_conn, prompt=user_input)
 
@@ -591,7 +590,6 @@ def render_metadata_sections(sidebar: st.delta_generator.DeltaGenerator) -> None
             expander.markdown(f"- **{label}:** `{value}`")
 
 
-
 @st.experimental_dialog("Error", width="small")
 def exception_as_dialog(e: Exception) -> None:
     st.error(f"An error occurred: {e}")
@@ -676,7 +674,9 @@ def set_up_requirements() -> None:
                 st.session_state["selected_iteration_stage"]
             )
         except (ValueError, ProgrammingError):
-            st.error("Insufficient permissions to read from the selected storage target.")
+            st.error(
+                "Insufficient permissions to read from the selected storage target."
+            )
             st.stop()
 
     file_name = st.selectbox(
@@ -775,7 +775,9 @@ def chat_settings_dialog() -> None:
 VALIDATE_HELP = """Save and validate changes to the active semantic model in this app. This is
 useful so you can then play with it in the chat panel on the right side."""
 
-DOWNLOAD_HELP = "Download the currently loaded semantic model YAML to your local machine."
+DOWNLOAD_HELP = (
+    "Download the currently loaded semantic model YAML to your local machine."
+)
 
 UPLOAD_HELP = """Upload the YAML to the selected ClickZetta volume. You want to do that whenever
 you think your semantic model is doing great and should be pushed to prod! Note that
@@ -791,7 +793,9 @@ def render_iteration_actions(sidebar: DeltaGenerator) -> None:
     Render the primary iteration actions (validate/download/upload/join) in the sidebar.
     """
 
-    yaml_content = st.session_state.get("working_yml") or st.session_state.get("yaml", "")
+    yaml_content = st.session_state.get("working_yml") or st.session_state.get(
+        "yaml", ""
+    )
     has_yaml_content = bool(yaml_content)
 
     if sidebar.button(

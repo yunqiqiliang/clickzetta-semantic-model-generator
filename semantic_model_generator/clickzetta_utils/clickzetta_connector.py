@@ -4,7 +4,6 @@ import concurrent.futures
 import re
 from collections import defaultdict
 from contextlib import contextmanager
-from types import SimpleNamespace
 from typing import Any, Dict, Generator, List, Optional, TypeVar, Union
 
 import pandas as pd
@@ -13,8 +12,10 @@ from loguru import logger
 
 from semantic_model_generator.clickzetta_utils import env_vars
 from semantic_model_generator.clickzetta_utils.utils import (
-    clickzetta_connection,
     create_session,
+    join_quoted_identifiers,
+    normalize_identifier,
+    quote_identifier,
 )
 from semantic_model_generator.data_processing.data_types import Column, Table
 
@@ -115,7 +116,9 @@ class ClickzettaCursor:
     def execute(self, query: str) -> "ClickzettaCursor":
         self._df = _execute_query_to_pandas(self._session, query)
         columns = [] if self._df is None else list(self._df.columns)
-        self.description = [(col, None, None, None, None, None, None) for col in columns]
+        self.description = [
+            (col, None, None, None, None, None, None) for col in columns
+        ]
         return self
 
     def fetchone(self) -> Optional[tuple[Any, ...]]:
@@ -153,14 +156,8 @@ class ClickzettaConnectionProxy:
         self.session.close()
 
 
-def _quote_identifier(name: str) -> str:
-    return f'"{name}"'
-
-
 def _qualify_table(workspace: str, schema_name: str, table_name: str) -> str:
-    return ".".join(
-        [_quote_identifier(workspace), _quote_identifier(schema_name), _quote_identifier(table_name)]
-    )
+    return join_quoted_identifiers(workspace, schema_name, table_name)
 
 
 def _value_is_true(value: Any) -> bool:
@@ -173,11 +170,9 @@ def _value_is_true(value: Any) -> bool:
 
 
 def _sanitize_identifier(value: Any, fallback: str = "") -> str:
-    if value is None or value == "":
+    normalized = normalize_identifier(value)
+    if not normalized:
         return fallback
-    normalized = str(value).strip()
-    if normalized.startswith('"') and normalized.endswith('"') and len(normalized) >= 2:
-        normalized = normalized[1:-1]
     return normalized
 
 
@@ -214,15 +209,19 @@ def _fetch_distinct_values(
     column_name: str,
     ndv: int,
 ) -> Optional[List[str]]:
-    workspace_part = _sanitize_identifier(workspace, workspace).upper() if workspace else ""
-    schema_part = _sanitize_identifier(schema_name, schema_name).upper() if schema_name else ""
-    table_part = _sanitize_identifier(table_name, table_name).upper()
-    column_part = _sanitize_identifier(column_name, column_name).upper()
+    workspace_part = _sanitize_identifier(workspace, workspace) if workspace else ""
+    schema_part = (
+        _sanitize_identifier(schema_name, schema_name) if schema_name else ""
+    )
+    table_part = _sanitize_identifier(table_name, table_name)
+    column_part = _sanitize_identifier(column_name, column_name)
 
-    qualified_parts = [part for part in (workspace_part, schema_part, table_part) if part]
-    qualified_table = ".".join(qualified_parts)
+    qualified_table = join_quoted_identifiers(
+        workspace_part, schema_part, table_part
+    )
+    column_expr = quote_identifier(column_part)
 
-    query = f"SELECT DISTINCT {column_part} FROM {qualified_table} LIMIT {ndv}"
+    query = f"SELECT DISTINCT {column_expr} FROM {qualified_table} LIMIT {ndv}"
     try:
         df = session.sql(query).to_pandas()
         if df.empty:
@@ -257,7 +256,6 @@ def _get_column_representation(
     else:
         column_datatype = str(column_datatype_raw)
     column_datatype = _normalize_column_type(column_datatype)
-    normalized_type = column_datatype.split("(")[0].strip()
     column_values = (
         _fetch_distinct_values(
             session=session,
@@ -351,7 +349,14 @@ def _catalog_category(session: Session, workspace: str) -> str:
         return "UNKNOWN"
 
     df.columns = [str(col).upper() for col in df.columns]
-    name_col = next((col for col in ("WORKSPACE_NAME", "NAME", "CATALOG_NAME") if col in df.columns), None)
+    name_col = next(
+        (
+            col
+            for col in ("WORKSPACE_NAME", "NAME", "CATALOG_NAME")
+            if col in df.columns
+        ),
+        None,
+    )
     category_col = next((col for col in ("CATEGORY",) if col in df.columns), None)
     if not name_col or not category_col:
         _CATALOG_CATEGORY_CACHE[workspace_upper] = "UNKNOWN"
@@ -408,7 +413,9 @@ ORDER BY kc.ordinal_position
         if result is not None:
             return result
     except Exception:
-        logger.debug("Primary key lookup via sys.information_schema failed; falling back.")
+        logger.debug(
+            "Primary key lookup via sys.information_schema failed; falling back."
+        )
 
     fallback_query = f"""
 SELECT kc.column_name
@@ -423,7 +430,13 @@ ORDER BY kc.ordinal_position
         if result is not None:
             return result
     except Exception as exc:
-        logger.warning("Primary key lookup failed for {}.{}.{}: {}", workspace, schema_name, table_name, exc)
+        logger.warning(
+            "Primary key lookup failed for {}.{}.{}: {}",
+            workspace,
+            schema_name,
+            table_name,
+            exc,
+        )
     return None
 
 
@@ -432,9 +445,7 @@ def _build_information_schema_query(
     table_schema: Optional[str],
     table_names: Optional[List[str]],
 ) -> str:
-    where_conditions: List[str] = [
-        "1=1"
-    ]
+    where_conditions: List[str] = ["1=1"]
     if table_schema:
         where_conditions.append(f"upper(t.table_schema) = '{table_schema.upper()}'")
     if table_names:
@@ -442,7 +453,6 @@ def _build_information_schema_query(
         where_conditions.append(f"upper(t.table_name) IN ({formatted_names})")
 
     where_clause = " AND ".join(where_conditions)
-    base = "information_schema"
     return f"""
 SELECT
     t.table_schema AS {_TABLE_SCHEMA_COL},
@@ -474,27 +484,48 @@ def _fetch_columns_via_show(
     schema = table_schema.upper() if table_schema else ""
 
     for table_name in table_names:
-        qualified_parts = [part for part in (catalog, schema, table_name.upper()) if part]
+        qualified_parts = [
+            part for part in (catalog, schema, table_name.upper()) if part
+        ]
         qualified_table = ".".join(qualified_parts)
         query = f"SHOW COLUMNS IN {qualified_table}"
         try:
             df = session.sql(query).to_pandas()
         except Exception as exc:
-            logger.debug("SHOW COLUMNS fallback failed for {}: {}", qualified_table, exc)
+            logger.debug(
+                "SHOW COLUMNS fallback failed for {}: {}", qualified_table, exc
+            )
             continue
         if df.empty:
             continue
         df.columns = [str(col).upper() for col in df.columns]
-        schema_col = next((col for col in ("TABLE_SCHEMA", "SCHEMA_NAME") if col in df.columns), None)
-        table_col = next((col for col in ("TABLE_NAME", "NAME") if col in df.columns), None)
-        column_col = next((col for col in ("COLUMN_NAME", "NAME") if col in df.columns and col != table_col), None)
-        datatype_col = next((col for col in ("DATA_TYPE", "TYPE") if col in df.columns), None)
-        comment_col = next((col for col in ("COMMENT", "COLUMN_COMMENT") if col in df.columns), None)
+        schema_col = next(
+            (col for col in ("TABLE_SCHEMA", "SCHEMA_NAME") if col in df.columns), None
+        )
+        table_col = next(
+            (col for col in ("TABLE_NAME", "NAME") if col in df.columns), None
+        )
+        column_col = next(
+            (
+                col
+                for col in ("COLUMN_NAME", "NAME")
+                if col in df.columns and col != table_col
+            ),
+            None,
+        )
+        datatype_col = next(
+            (col for col in ("DATA_TYPE", "TYPE") if col in df.columns), None
+        )
+        comment_col = next(
+            (col for col in ("COMMENT", "COLUMN_COMMENT") if col in df.columns), None
+        )
 
         normalized = pd.DataFrame()
         normalized[_TABLE_SCHEMA_COL] = df[schema_col] if schema_col else table_schema
         normalized[_TABLE_NAME_COL] = df[table_col] if table_col else table_name
-        normalized[_COLUMN_NAME_COL] = df[column_col] if column_col else df.index.astype(str)
+        normalized[_COLUMN_NAME_COL] = (
+            df[column_col] if column_col else df.index.astype(str)
+        )
         normalized[_DATATYPE_COL] = df[datatype_col] if datatype_col else ""
         normalized[_COLUMN_COMMENT_ALIAS] = df[comment_col] if comment_col else ""
         normalized[_TABLE_COMMENT_COL] = ""
@@ -552,6 +583,7 @@ def get_valid_schemas_tables_columns_df(
     if _TABLE_SCHEMA_COL in result.columns:
         result[_TABLE_SCHEMA_COL] = result[_TABLE_SCHEMA_COL].astype(str).str.upper()
     if _IS_PRIMARY_KEY_COL in result.columns:
+
         def _normalize_pk(value: Any) -> bool:
             if isinstance(value, bool):
                 return value
@@ -617,10 +649,10 @@ def fetch_tables_views_in_schema(
     workspace_upper = workspace.upper()
     schema_upper = schema.upper()
 
-    target = ""
     try:
         if workspace_upper and schema_upper:
-            df = session.sql(f"SHOW TABLES IN {workspace_upper}.{schema_upper}").to_pandas()
+            scope = join_quoted_identifiers(workspace_upper, schema_upper)
+            df = session.sql(f"SHOW TABLES IN {scope}").to_pandas()
         else:
             df = session.sql("SHOW TABLES").to_pandas()
     except Exception as exc:  # pragma: no cover
@@ -634,17 +666,27 @@ def fetch_tables_views_in_schema(
     df.columns = [str(col).upper() for col in df.columns]
     name_column = "TABLE_NAME" if "TABLE_NAME" in df.columns else df.columns[0]
     schema_column = next(
-        (col for col in ("SCHEMA_NAME", "TABLE_SCHEMA", "NAMESPACE") if col in df.columns),
+        (
+            col
+            for col in ("SCHEMA_NAME", "TABLE_SCHEMA", "NAMESPACE")
+            if col in df.columns
+        ),
         None,
     )
     catalog_column = next(
-        (col for col in ("CATALOG_NAME", "WORKSPACE_NAME", "TABLE_CATALOG") if col in df.columns),
+        (
+            col
+            for col in ("CATALOG_NAME", "WORKSPACE_NAME", "TABLE_CATALOG")
+            if col in df.columns
+        ),
         None,
     )
 
     results: List[str] = []
     for _, row in df.iterrows():
-        if _value_is_true(row.get("IS_VIEW")) and not _value_is_true(row.get("IS_MATERIALIZED_VIEW")):
+        if _value_is_true(row.get("IS_VIEW")) and not _value_is_true(
+            row.get("IS_MATERIALIZED_VIEW")
+        ):
             continue
         if _value_is_true(row.get("IS_EXTERNAL")):
             continue
@@ -686,11 +728,15 @@ def fetch_stages_in_schema(connection: Any, schema_name: str) -> List[str]:
 
     queries: List[str] = []
     if schema:
-        queries.append(f"SHOW VOLUMES IN {workspace}.{schema}")
-        queries.append(f"SHOW STAGES IN SCHEMA {workspace}.{schema}")
+        scope = join_quoted_identifiers(workspace, schema)
+        if scope:
+            queries.append(f"SHOW VOLUMES IN {scope}")
+            queries.append(f"SHOW STAGES IN SCHEMA {scope}")
     else:
-        queries.append(f"SHOW VOLUMES IN {workspace}")
-        queries.append(f"SHOW STAGES IN DATABASE {workspace}")
+        workspace_identifier = quote_identifier(workspace)
+        if workspace_identifier:
+            queries.append(f"SHOW VOLUMES IN {workspace_identifier}")
+            queries.append(f"SHOW STAGES IN DATABASE {workspace_identifier}")
 
     stage_names: List[str] = ["volume:user://~/semantic_models/"]
     seen: set[str] = set(stage_names)
@@ -756,7 +802,11 @@ def fetch_yaml_names_in_stage(
     if stage.lower().startswith("volume:user://"):
         volume_body = stage[len("volume:") :]
         # Normalize relative directory
-        relative = volume_body[len("user://") :] if volume_body.startswith("user://") else volume_body
+        relative = (
+            volume_body[len("user://") :]
+            if volume_body.startswith("user://")
+            else volume_body
+        )
         relative = relative.lstrip("~/")
         relative = relative.strip("/")
 
@@ -842,7 +892,9 @@ def create_table_in_schema(
     table_fqn: str,
     columns_schema: Dict[str, str],
 ) -> bool:
-    fields = ", ".join(f"{_quote_identifier(name)} {dtype}" for name, dtype in columns_schema.items())
+    fields = ", ".join(
+        f"{quote_identifier(name)} {dtype}" for name, dtype in columns_schema.items()
+    )
     query = f"CREATE TABLE IF NOT EXISTS {table_fqn} ({fields})"
     try:
         session.sql(query).collect()

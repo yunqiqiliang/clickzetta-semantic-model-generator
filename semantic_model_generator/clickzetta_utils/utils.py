@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from typing import Dict, Iterable
+from typing import Any, Dict, Iterable
 
 from clickzetta.zettapark.session import Session
 
@@ -19,6 +19,47 @@ DEFAULT_HINTS: Dict[str, str] = {
     "cz.sql.index.prewhere.enabled": "true",
     "cz.storage.parquet.enable.io.prefetch": "false",
 }
+
+
+def normalize_identifier(value: Any) -> str:
+    """
+    Strips outer quotes/backticks and surrounding whitespace from an identifier.
+    Returns an empty string when the identifier is missing.
+    """
+
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in {'"', '`'}:
+        return text[1:-1]
+    return text
+
+
+def quote_identifier(value: Any) -> str:
+    """
+    Wraps an identifier in backticks, escaping embedded backticks as needed.
+    Returns an empty string if the identifier is missing.
+    """
+
+    normalized = normalize_identifier(value)
+    if not normalized:
+        return ""
+    escaped = normalized.replace("`", "``")
+    return f"`{escaped}`"
+
+
+def join_quoted_identifiers(*parts: Any) -> str:
+    """
+    Joins identifier parts with '.' and ensures each segment is backtick-quoted.
+    Empty segments are skipped.
+    """
+
+    quoted_parts = [
+        quote_identifier(part)
+        for part in parts
+        if normalize_identifier(part)
+    ]
+    return ".".join(part for part in quoted_parts if part)
 
 
 def create_fqn_table(fqn_str: str) -> FQNParts:
@@ -72,7 +113,8 @@ def _apply_session_context(session: Session, *, schema: str, vcluster: str) -> N
         ("schema", schema),
         ("vcluster", vcluster),
     ):
-        session.sql(f"USE {component.upper()} {value.upper()}")
+        identifier = quote_identifier(value)
+        session.sql(f"USE {component.upper()} {identifier}")
 
 
 def _iter_non_empty(*pairs: tuple[str, str]) -> Iterable[tuple[str, str]]:

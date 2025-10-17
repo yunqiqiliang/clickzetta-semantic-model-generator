@@ -31,8 +31,18 @@ def test_string_date_promoted_to_time_dimension() -> None:
         id_=0,
         name="ORDERS",
         columns=[
-            Column(id_=0, column_name="order_date", column_type="STRING", values=["2024-01-01", "2024-02-01"]),
-            Column(id_=1, column_name="order_status", column_type="STRING", values=["OPEN", "CLOSED"]),
+            Column(
+                id_=0,
+                column_name="order_date",
+                column_type="STRING",
+                values=["2024-01-01", "2024-02-01"],
+            ),
+            Column(
+                id_=1,
+                column_name="order_status",
+                column_type="STRING",
+                values=["OPEN", "CLOSED"],
+            ),
         ],
     )
 

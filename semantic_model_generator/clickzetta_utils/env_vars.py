@@ -20,7 +20,9 @@ _CONFIG_PATHS = [
 _ACTIVE_CONFIG_PATH: Optional[str] = None
 
 
-def _load_config_from_file() -> Tuple[Optional[Dict[str, str]], Dict[str, Dict[str, str]]]:
+def _load_config_from_file() -> (
+    Tuple[Optional[Dict[str, str]], Dict[str, Dict[str, str]]]
+):
     global _ACTIVE_CONFIG_PATH
     _ACTIVE_CONFIG_PATH = None
     for path in _CONFIG_PATHS:
@@ -91,7 +93,10 @@ def _deep_lookup(mapping: Any, key: str) -> Optional[Any]:
         if isinstance(current, dict):
             for candidate_key, candidate_value in current.items():
                 candidate_key_str = str(candidate_key).lower()
-                if candidate_key_str == normalized_key and candidate_value not in (None, ""):
+                if candidate_key_str == normalized_key and candidate_value not in (
+                    None,
+                    "",
+                ):
                     return candidate_value
                 if isinstance(candidate_value, (dict, list)):
                     queue.append(candidate_value)

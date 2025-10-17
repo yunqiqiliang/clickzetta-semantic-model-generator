@@ -1,5 +1,7 @@
 .PHONY: run_admin_app docker-buildx docker-buildx-push ensure-docker
 
+POETRY_RUN ?= poetry run
+
 # Docker image configuration (override via environment variables as needed)
 
 ensure-docker: ## verify docker and buildx are available
@@ -31,11 +33,14 @@ install-python-3.8:
 check-deps:
 	@command -v poetry >/dev/null 2>&1 || $(MAKE) install-poetry
 
+ensure-poetry-env: check-deps
+	poetry env use python3.11 >/dev/null
+
 
 shell: check-deps ## Get into a poetry shell
-	poetry shell
+	$(POETRY_RUN) $${SHELL:-/bin/bash} -l
 
-setup: check-deps shell ## Install dependencies into your poetry environment.
+setup: ensure-poetry-env ## Install dependencies into your poetry environment.
 	poetry install
 
 # app
@@ -48,35 +53,35 @@ setup_admin_app:
 
 # Linting and formatting below.
 run_mypy:  ## Run mypy
-	mypy --config-file=mypy.ini .
+	$(POETRY_RUN) mypy --config-file=mypy.ini .
 
 run_flake8:  ## Run flake8
-	flake8 --ignore=E203,E501,W503 --exclude=venv,.venv,pyvenv,tmp,*_pb2.py,*_pb2.pyi,images/*/src .
+	$(POETRY_RUN) flake8 --ignore=E203,E501,W503 --exclude=venv,.venv,pyvenv,tmp,*_pb2.py,*_pb2.pyi,images/*/src .
 
 check_black:  ## Check to see if files would be updated with black.
     # Exclude pyvenv and all generated protobuf code.
-	black --check --exclude=".venv|venv|pyvenv|.*_pb2.py|.*_pb2.pyi" .
+	$(POETRY_RUN) black --check --exclude=".venv|venv|pyvenv|.*_pb2.py|.*_pb2.pyi" .
 
 run_black:  ## Run black to format files.
     # Exclude pyvenv, tmp, and all generated protobuf code.
-	black --exclude=".venv|venv|pyvenv|tmp|.*_pb2.py|.*_pb2.pyi" .
+	$(POETRY_RUN) black --exclude=".venv|venv|pyvenv|tmp|.*_pb2.py|.*_pb2.pyi" .
 
 check_isort:  ## Check if files would be updated with isort.
-	isort --profile black --check --skip=venv --skip=pyvenv --skip=.venv --skip-glob='*_pb2.py*' .
+	$(POETRY_RUN) isort --profile black --check --skip=venv --skip=pyvenv --skip=.venv --skip-glob='*_pb2.py*' .
 
 run_isort:  ## Run isort to update imports.
-	isort --profile black --skip=pyvenv --skip=venv --skip=tmp --skip=.venv --skip-glob='*_pb2.py*' .
+	$(POETRY_RUN) isort --profile black --skip=pyvenv --skip=venv --skip=tmp --skip=.venv --skip-glob='*_pb2.py*' .
 
 
-fmt_lint: shell ## lint/fmt in current python environment
-	make run_black run_isort run_flake8
+fmt_lint: ensure-poetry-env ## lint/fmt in current python environment
+	$(MAKE) run_black run_isort run_flake8
 
 # Test below
-test: shell ## Run tests.
-	python -m pytest -vvs semantic_model_generator
+test: ensure-poetry-env ## Run tests.
+	$(POETRY_RUN) python -m pytest -vvs semantic_model_generator
 
 test_github_workflow:  ## For use on github workflow.
-	python -m pytest -vvs semantic_model_generator
+	$(POETRY_RUN) python -m pytest -vvs semantic_model_generator
 
 # Release
 update-version: ## Bump poetry and github version. TYPE should be `patch` `minor` or `major`

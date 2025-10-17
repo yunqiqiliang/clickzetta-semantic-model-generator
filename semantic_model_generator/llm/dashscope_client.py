@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 from http import HTTPStatus
@@ -8,6 +7,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse, urlunparse
 
 from loguru import logger
+
 try:
     import dashscope  # type: ignore
     from dashscope import Generation  # type: ignore
@@ -144,7 +144,9 @@ class DashscopeClient:
 
         output = getattr(response, "output", None)
         if not output or not hasattr(output, "choices"):
-            raise DashscopeError(f"DashScope response missing output choices: {response}")
+            raise DashscopeError(
+                f"DashScope response missing output choices: {response}"
+            )
 
         choices = getattr(output, "choices")
         if not choices:

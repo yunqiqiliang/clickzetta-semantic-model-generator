@@ -4,13 +4,10 @@ import streamlit as st
 from streamlit_extras.row import row
 
 from app_utils.shared_utils import get_clickzetta_connection
-from semantic_model_generator.data_processing.cte_utils import (
-    fully_qualified_table_name,
-)
-from semantic_model_generator.protos import semantic_model_pb2
 from semantic_model_generator.clickzetta_utils.clickzetta_connector import (
     get_table_primary_keys,
 )
+from semantic_model_generator.protos import semantic_model_pb2
 
 SUPPORTED_JOIN_TYPES = [
     join_type

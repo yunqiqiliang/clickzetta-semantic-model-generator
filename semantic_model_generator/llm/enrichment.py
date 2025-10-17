@@ -11,6 +11,7 @@ from semantic_model_generator.data_processing import data_types
 from semantic_model_generator.protos import semantic_model_pb2
 
 from .dashscope_client import DashscopeClient, DashscopeError
+from .progress_tracker import EnrichmentProgressTracker, EnrichmentStage
 
 if TYPE_CHECKING:  # pragma: no cover
     from clickzetta.zettapark.session import Session
@@ -44,6 +45,7 @@ def enrich_semantic_model(
     placeholder: str = "  ",
     custom_prompt: str = "",
     session: Optional[Session] = None,
+    progress_tracker: Optional[EnrichmentProgressTracker] = None,
 ) -> None:
     """
     Enriches the semantic model in-place using DashScope generated descriptions.
@@ -55,21 +57,51 @@ def enrich_semantic_model(
         placeholder: Placeholder string designating missing content.
         custom_prompt: Optional user-provided guidance appended to the LLM prompt.
         session: Optional ClickZetta session used for validating generated SQL (e.g., verified queries).
+        progress_tracker: Optional progress tracker for reporting enrichment progress.
     """
 
     if not model.tables or not raw_tables:
         return
 
-    raw_lookup: Dict[str, data_types.Table] = {tbl.name.upper(): tbl for _, tbl in raw_tables}
+    # Initialize progress tracking
+    total_tables = len(model.tables)
+
+    if progress_tracker:
+        progress_tracker.update_progress(
+            EnrichmentStage.TABLE_ENRICHMENT,
+            0,
+            total_tables,
+            message="Starting table enrichment",
+        )
+
+    raw_lookup: Dict[str, data_types.Table] = {
+        tbl.name.upper(): tbl for _, tbl in raw_tables
+    }
     metric_notes: List[str] = []
 
-    for table in model.tables:
+    # Process each table with progress tracking
+    for table_index, table in enumerate(model.tables):
         raw_table = raw_lookup.get(table.name.upper())
         if not raw_table:
-            logger.debug("No raw metadata for table {}; skipping enrichment.", table.name)
+            logger.debug(
+                "No raw metadata for table {}; skipping enrichment.", table.name
+            )
             continue
+
+        # Update progress for current table
+        if progress_tracker:
+            progress_tracker.update_progress(
+                EnrichmentStage.TABLE_ENRICHMENT,
+                table_index + 1,
+                total_tables,
+                table_name=table.name,
+                message=f"Enriching table {table.name}",
+            )
+
         try:
-            payload = _serialize_table_prompt(table, raw_table, model.description, placeholder)
+            payload = _serialize_table_prompt(
+                table, raw_table, model.description, placeholder, custom_prompt
+            )
             response = client.chat_completion(payload["messages"])
             enrichment = _parse_llm_response(response.content)
             if enrichment:
@@ -81,15 +113,46 @@ def enrich_semantic_model(
                 if (
                     model_description
                     and isinstance(model_description, str)
-                    and (model.description == placeholder or not model.description.strip())
+                    and (
+                        model.description == placeholder
+                        or not model.description.strip()
+                    )
                 ):
                     model.description = model_description.strip()
-        except DashscopeError as exc:  # pragma: no cover - network failures or remote errors
+        except (
+            DashscopeError
+        ) as exc:  # pragma: no cover - network failures or remote errors
             logger.warning("DashScope enrichment failed for {}: {}", table.name, exc)
         except Exception as exc:  # pragma: no cover - defensive guard
             logger.exception("Unexpected error enriching table {}: {}", table.name, exc)
+    # Model description generation
+    if progress_tracker:
+        progress_tracker.update_progress(
+            EnrichmentStage.MODEL_DESCRIPTION,
+            0,
+            1,
+            message="Generating model description",
+        )
+
     if model.description == placeholder or not model.description.strip():
         _summarize_model_description(model, client, placeholder)
+
+    if progress_tracker:
+        progress_tracker.update_progress(
+            EnrichmentStage.MODEL_DESCRIPTION,
+            1,
+            1,
+            message="Model description generated",
+        )
+
+    # Model metrics generation
+    if progress_tracker:
+        progress_tracker.update_progress(
+            EnrichmentStage.MODEL_METRICS,
+            0,
+            1,
+            message="Generating model-level metrics",
+        )
 
     overview = _build_model_overview(model, raw_lookup, raw_tables)
     try:
@@ -98,6 +161,20 @@ def enrich_semantic_model(
         logger.warning("Failed to generate model-level metrics: {}", exc)
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("Unexpected error generating model metrics: {}", exc)
+
+    if progress_tracker:
+        progress_tracker.update_progress(
+            EnrichmentStage.MODEL_METRICS, 1, 1, message="Model metrics generated"
+        )
+
+    # Verified queries generation
+    if progress_tracker:
+        progress_tracker.update_progress(
+            EnrichmentStage.VERIFIED_QUERIES,
+            0,
+            1,
+            message="Generating verified queries",
+        )
 
     try:
         _generate_verified_queries(
@@ -113,10 +190,19 @@ def enrich_semantic_model(
     except Exception as exc:  # pragma: no cover - defensive
         logger.exception("Unexpected error generating verified queries: {}", exc)
 
+    if progress_tracker:
+        progress_tracker.update_progress(
+            EnrichmentStage.VERIFIED_QUERIES, 1, 1, message="Verified queries generated"
+        )
+
     if metric_notes:
         model.custom_instructions = "\n".join(metric_notes)
     else:
         model.custom_instructions = ""
+
+    # Mark enrichment as complete
+    if progress_tracker:
+        progress_tracker.mark_complete()
 
 
 def _serialize_table_prompt(
@@ -124,6 +210,7 @@ def _serialize_table_prompt(
     raw_table: data_types.Table,
     model_description: str,
     placeholder: str,
+    custom_prompt: str = "",
 ) -> Dict[str, Any]:
     column_roles: Dict[str, str] = {}
     column_descriptions: Dict[str, str] = {}
@@ -165,7 +252,9 @@ def _serialize_table_prompt(
                 "name": nf.name,
                 "expr": nf.expr,
                 "has_description": bool(nf.description.strip()),
-                "has_synonyms": any(s.strip() and s != placeholder for s in nf.synonyms),
+                "has_synonyms": any(
+                    s.strip() and s != placeholder for s in nf.synonyms
+                ),
             }
             for nf in table.filters
         ],
@@ -187,14 +276,14 @@ def _serialize_table_prompt(
         "{\n"
         '  "table_description": "Orders fact table that captures the status and finances of each order",\n'
         '  "columns": [\n'
-        '    {\n'
+        "    {\n"
         '      "name": "O_TOTALPRICE",\n'
         '      "description": "Total order value including tax",\n'
         '      "synonyms": ["Order amount", "Order total"]\n'
         "    }\n"
         "  ],\n"
         '  "business_metrics": [\n'
-        '    {\n'
+        "    {\n"
         '      "name": "Gross merchandise value",\n'
         '      "source_columns": ["O_TOTALPRICE"],\n'
         '      "description": "Used to measure GMV derived from the total order price."\n'
@@ -223,7 +312,9 @@ def _parse_llm_response(content: str) -> Optional[Dict[str, object]]:
     try:
         data = json.loads(json_text)
     except json.JSONDecodeError as exc:
-        logger.warning("Unable to parse DashScope response as JSON: {} | raw={}", exc, content)
+        logger.warning(
+            "Unable to parse DashScope response as JSON: {} | raw={}", exc, content
+        )
         return None
     if not isinstance(data, dict):
         return None
@@ -285,7 +376,10 @@ def _apply_column_enrichment(
             continue
 
         description = entry.get("description")
-        if isinstance(description, str) and getattr(target, "description", "") == placeholder:
+        if (
+            isinstance(description, str)
+            and getattr(target, "description", "") == placeholder
+        ):
             target.description = description.strip()
 
         synonyms = entry.get("synonyms")
@@ -293,7 +387,9 @@ def _apply_column_enrichment(
             _apply_synonyms(target, synonyms, placeholder)
 
 
-def _apply_synonyms(target: object, synonyms: Sequence[object], placeholder: str) -> None:
+def _apply_synonyms(
+    target: object, synonyms: Sequence[object], placeholder: str
+) -> None:
     clean_synonyms: List[str] = []
     for item in synonyms:
         if isinstance(item, str):
@@ -303,7 +399,11 @@ def _apply_synonyms(target: object, synonyms: Sequence[object], placeholder: str
     if not clean_synonyms:
         return
 
-    existing = [syn for syn in getattr(target, "synonyms", []) if syn.strip() and syn != placeholder]
+    existing = [
+        syn
+        for syn in getattr(target, "synonyms", [])
+        if syn.strip() and syn != placeholder
+    ]
     merged = _deduplicate(existing + clean_synonyms)
 
     if hasattr(target, "synonyms"):
@@ -369,7 +469,11 @@ def _apply_filter_enrichment(
             target.description = description.strip()
         synonyms = entry.get("synonyms")
         if isinstance(synonyms, list):
-            clean_synonyms = [str(item).strip() for item in synonyms if isinstance(item, (str, int, float))]
+            clean_synonyms = [
+                str(item).strip()
+                for item in synonyms
+                if isinstance(item, (str, int, float))
+            ]
             if clean_synonyms:
                 del target.synonyms[:]
                 target.synonyms.extend(clean_synonyms)
@@ -400,7 +504,15 @@ _COUNT_KEYWORDS = (
     "headcount",
 )
 _DISTINCT_KEYWORDS = ("distinct", "unique", "deduplicated")
-_AVERAGE_KEYWORDS = ("average", "avg", "mean", "typical", "expected", "per order", "per customer")
+_AVERAGE_KEYWORDS = (
+    "average",
+    "avg",
+    "mean",
+    "typical",
+    "expected",
+    "per order",
+    "per customer",
+)
 _SUM_KEYWORDS = (
     "total",
     "sum",
@@ -527,7 +639,9 @@ def _apply_metric_enrichment(
     business_metrics: Sequence[object],
     placeholder: str,
 ) -> tuple[Optional[str], bool]:
-    column_type_map = {col.column_name.upper(): col.column_type for col in raw_table.columns}
+    column_type_map = {
+        col.column_name.upper(): col.column_type for col in raw_table.columns
+    }
     existing_names: set[str] = {metric.name for metric in table.metrics}
     notes: List[Dict[str, object]] = []
     metrics_added = False
@@ -551,8 +665,12 @@ def _apply_metric_enrichment(
                 continue
 
         metric_name = _sanitize_metric_name(name, existing_names)
-        aggregation, use_product = _derive_metric_intent(entry, resolved_sources, column_type_map)
-        expression = _build_metric_expression(resolved_sources, column_type_map, aggregation, use_product)
+        aggregation, use_product = _derive_metric_intent(
+            entry, resolved_sources, column_type_map
+        )
+        expression = _build_metric_expression(
+            resolved_sources, column_type_map, aggregation, use_product
+        )
 
         metric = table.metrics.add()
         metric.name = metric_name
@@ -560,7 +678,9 @@ def _apply_metric_enrichment(
 
         description = entry.get("description")
         metric.description = (
-            description.strip() if isinstance(description, str) and description.strip() else placeholder
+            description.strip()
+            if isinstance(description, str) and description.strip()
+            else placeholder
         )
 
         synonyms = entry.get("synonyms")
@@ -578,8 +698,16 @@ def _apply_metric_enrichment(
         notes.append(
             {
                 "name": name.strip(),
-                "source_columns": raw_sources if isinstance(raw_sources, list) and raw_sources else resolved_sources,
-                "description": description.strip() if isinstance(description, str) and description.strip() else "",
+                "source_columns": (
+                    raw_sources
+                    if isinstance(raw_sources, list) and raw_sources
+                    else resolved_sources
+                ),
+                "description": (
+                    description.strip()
+                    if isinstance(description, str) and description.strip()
+                    else ""
+                ),
             }
         )
         metrics_added = True
@@ -600,7 +728,9 @@ def _summarize_model_description(
     table_lines = []
     for table in model.tables:
         role = "fact" if table.facts or table.metrics else "dimension"
-        desc = table.description.strip() if table.description.strip() else "No description"
+        desc = (
+            table.description.strip() if table.description.strip() else "No description"
+        )
         metrics = ", ".join(metric.name for metric in table.metrics) or "None"
         table_lines.append(f"- {table.name} ({role}): {desc}. Metrics: {metrics}")
 
@@ -609,7 +739,8 @@ def _summarize_model_description(
         parts = [f"{rel.left_table} -> {rel.right_table}"]
         if rel.relationship_columns:
             columns = ", ".join(
-                f"{col.left_column}={col.right_column}" for col in rel.relationship_columns
+                f"{col.left_column}={col.right_column}"
+                for col in rel.relationship_columns
             )
             parts.append(f"on {columns}")
         relationship_lines.append(" ".join(parts))
@@ -671,8 +802,12 @@ def _build_model_overview(
             "name": table.name,
             "description": (table.description or "").strip(),
             "base_table": {
-                "database": table.base_table.database if table.HasField("base_table") else "",
-                "schema": table.base_table.schema if table.HasField("base_table") else "",
+                "database": (
+                    table.base_table.database if table.HasField("base_table") else ""
+                ),
+                "schema": (
+                    table.base_table.schema if table.HasField("base_table") else ""
+                ),
                 "table": table.base_table.table if table.HasField("base_table") else "",
             },
             "dimensions": [
@@ -750,7 +885,9 @@ def _build_model_overview(
                 "left_table": rel.left_table,
                 "right_table": rel.right_table,
                 "join_type": semantic_model_pb2.JoinType.Name(rel.join_type),
-                "relationship_type": semantic_model_pb2.RelationshipType.Name(rel.relationship_type),
+                "relationship_type": semantic_model_pb2.RelationshipType.Name(
+                    rel.relationship_type
+                ),
                 "columns": [
                     {"left_column": col.left_column, "right_column": col.right_column}
                     for col in rel.relationship_columns
@@ -772,25 +909,87 @@ def _generate_model_metrics(
     if not overview.get("tables"):
         return
 
-    fact_tables = sum(1 for table in model.tables if len(table.facts) > 0)
-    if fact_tables <= 1:
-        logger.debug(
-            "Skipping model-level metrics because only %s fact table(s) were detected.",
-            fact_tables,
+    # Robust pre-check for metrics field accessibility
+    metrics_accessible = False
+
+    # Step 1: Check if metrics attribute exists
+    if not hasattr(model, "metrics"):
+        logger.warning(
+            "Model object missing 'metrics' attribute, skipping model-level metrics generation"
         )
         return
+
+    # Step 2: Test basic read access
+    try:
+        current_count = len(model.metrics)
+        logger.debug("Metrics field read access OK, current count: {}", current_count)
+        metrics_accessible = True
+    except Exception as exc:
+        logger.warning("Cannot read model.metrics field: {}", str(exc))
+        return
+
+    # Step 3: Test write access only if read access succeeded
+    if metrics_accessible:
+        try:
+            # Try a minimal write operation
+            test_metric = model.metrics.add()
+            test_metric.name = "__test__"
+            test_metric.expr = "COUNT(1)"
+
+            # Verify the metric was actually added
+            new_count = len(model.metrics)
+            if new_count == current_count + 1:
+                # Success - clean up the test metric
+                del model.metrics[-1]
+                logger.debug("Metrics field write access verified and cleaned up")
+            else:
+                # Metric add appeared to succeed but count didn't change - something is wrong
+                logger.warning(
+                    "Metrics field write access inconsistent (count: {} -> {}), skipping model-level metrics",
+                    current_count,
+                    new_count,
+                )
+                return
+
+        except Exception as exc:
+            logger.warning("Cannot write to model.metrics field: {}", str(exc))
+            # Try to provide diagnostic information without causing more errors
+            try:
+                logger.debug(
+                    "Model type: {}, metrics type: {}",
+                    type(model).__name__,
+                    type(getattr(model, "metrics", None)),
+                )
+            except Exception:
+                pass
+            return
+
+    # Count total facts across all tables to determine if model-level metrics make sense
+    total_facts = sum(len(table.facts) for table in model.tables)
+
+    # Skip model-level metrics only if there are no facts at all
+    if total_facts < 1:
+        logger.debug("Skipping model-level metrics because no facts were detected.")
+        return
+
+    # Allow model-level metrics for most scenarios:
+    # - Multiple fact tables (cross-table metrics)
+    # - Single fact table with multiple facts (combined metrics)
+    # - Single fact table with relationships (cross-table potential)
+    # - Even single fact table without relationships (still useful for model-level aggregation)
+    # Only skip in very limited cases: no fact tables at all (handled above)
 
     prompt_json = json.dumps(overview, ensure_ascii=False, indent=2)
     instructions = (
         "Design up to three model-level business metrics (KPIs) using the semantic model summary below.\n"
         "Return JSON with the structure:\n"
         "{\n"
-        "  \"model_metrics\": [\n"
+        '  "model_metrics": [\n'
         "    {\n"
-        "      \"name\": \"...\",\n"
-        "      \"expr\": \"SUM(FACT_SALES.total_amount)\",\n"
-        "      \"description\": \"...\",\n"
-        "      \"synonyms\": [\"...\"]\n"
+        '      "name": "...",\n'
+        '      "expr": "SUM(FACT_SALES.total_amount)",\n'
+        '      "description": "...",\n'
+        '      "synonyms": ["..."]\n'
         "    }\n"
         "  ]\n"
         "}\n"
@@ -813,13 +1012,22 @@ def _generate_model_metrics(
     response = client.chat_completion(messages)
     payload = _parse_llm_response(response.content)
     if not isinstance(payload, dict):
+        logger.debug("Failed to parse LLM response as dict for model metrics")
         return
 
     entries = payload.get("model_metrics")
     if not isinstance(entries, list):
+        logger.debug(
+            "No model_metrics list found in LLM response: {}",
+            payload.keys() if payload else "None",
+        )
         return
 
+    logger.debug("Found {} model metrics entries to process", len(entries))
+
+    # Get existing metric names (pre-check ensures this will work)
     existing_names: set[str] = {metric.name for metric in model.metrics}
+
     for table in model.tables:
         existing_names.update(metric.name for metric in table.metrics)
 
@@ -836,7 +1044,20 @@ def _generate_model_metrics(
         if not isinstance(expr, str) or not expr.strip():
             continue
 
-        metric = model.metrics.add()
+        # Add metric with additional safety check
+        try:
+            metric = model.metrics.add()
+        except Exception as exc:
+            logger.warning(
+                "Failed to add model-level metric '{}' despite pre-check: {}",
+                name,
+                str(exc),
+            )
+            logger.info(
+                "Aborting model-level metrics generation due to unexpected field access failure"
+            )
+            return
+
         metric.name = _sanitize_metric_name(name, existing_names)
         metric.expr = expr.strip().rstrip(";")
 
@@ -848,7 +1069,11 @@ def _generate_model_metrics(
 
         synonyms = entry.get("synonyms")
         if isinstance(synonyms, list):
-            clean_synonyms = [str(item).strip() for item in synonyms if isinstance(item, (str, int, float)) and str(item).strip()]
+            clean_synonyms = [
+                str(item).strip()
+                for item in synonyms
+                if isinstance(item, (str, int, float)) and str(item).strip()
+            ]
             if clean_synonyms:
                 metric.synonyms.extend(clean_synonyms)
 
@@ -885,7 +1110,9 @@ def _generate_verified_queries(
     max_items: int = 3,
 ) -> None:
     if session is None:
-        logger.debug("Skipping verified query generation because no ClickZetta session was provided.")
+        logger.debug(
+            "Skipping verified query generation because no ClickZetta session was provided."
+        )
         return
 
     prompt_json = json.dumps(overview, ensure_ascii=False, indent=2)
@@ -931,7 +1158,11 @@ def _generate_verified_queries(
             continue
         query_name = entry.get("name")
         if not isinstance(query_name, str) or not query_name.strip():
-            query_name = question if isinstance(question, str) and question.strip() else "Verified query"
+            query_name = (
+                question
+                if isinstance(question, str) and question.strip()
+                else "Verified query"
+            )
 
         normalized_sql = _ensure_limit_clause(sql)
         if normalized_sql.strip().lower() in existing_sql:
@@ -940,7 +1171,11 @@ def _generate_verified_queries(
         try:
             session.sql(normalized_sql).to_pandas()
         except Exception as exc:  # pragma: no cover - ClickZetta query failed
-            logger.warning("Skipping verified query '%s' due to validation failure: %s", query_name, exc)
+            logger.warning(
+                "Skipping verified query '{}' due to validation failure: {}",
+                query_name,
+                exc,
+            )
             continue
 
         verified_query = model.verified_queries.add()

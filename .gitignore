@@ -16,6 +16,7 @@ pyvenv
 
 # Python package builds
 *.egg-info
+dist/
 
 # VSCode
 .vscode/settings.json
@@ -32,6 +33,7 @@ pyvenv
 .venv
 .direnv
 .envrc
+.poetry-cache/
 
 # Output semantic models
 semantic_model_generator/output_models/*.yaml

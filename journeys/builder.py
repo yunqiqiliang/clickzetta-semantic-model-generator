@@ -15,7 +15,9 @@ from app_utils.shared_utils import (
 from semantic_model_generator.llm import is_llm_available
 
 
-@st.experimental_dialog("Selecting your tables to Create new Semantic Model", width="large")
+@st.experimental_dialog(
+    "Selecting your tables to Create new Semantic Model", width="large"
+)
 def table_selector_dialog() -> None:
     st.write(
         "Please fill out the following fields to start building your semantic model."
@@ -73,10 +75,14 @@ def table_selector_dialog() -> None:
         try:
             schemas.extend(get_available_schemas(db))
         except ProgrammingError:
-            logger.info("Insufficient permissions to read from database {}, skipping", db)
+            logger.info(
+                "Insufficient permissions to read from database {}, skipping", db
+            )
     st.session_state["available_schemas"] = schemas
     st.session_state["selected_schemas"] = [
-        schema for schema in st.session_state.get("selected_schemas", []) if schema in schemas
+        schema
+        for schema in st.session_state.get("selected_schemas", [])
+        if schema in schemas
     ]
 
     st.multiselect(
@@ -96,7 +102,9 @@ def table_selector_dialog() -> None:
             logger.warning("Unable to list tables for {}: {}", schema, exc)
     st.session_state["available_tables"] = tables
     st.session_state["selected_tables"] = [
-        table for table in st.session_state.get("selected_tables", []) if table in tables
+        table
+        for table in st.session_state.get("selected_tables", [])
+        if table in tables
     ]
 
     st.multiselect(
@@ -122,9 +130,7 @@ def table_selector_dialog() -> None:
         "and generate starter questions to accelerate review."
     )
     if not llm_available:
-        llm_help = (
-            f"{llm_help} Configure DashScope credentials in your ClickZetta connection first."
-        )
+        llm_help = f"{llm_help} Configure DashScope credentials in your ClickZetta connection first."
 
     llm_enrichment = st.checkbox(
         "Use DashScope to enrich semantic metadata",

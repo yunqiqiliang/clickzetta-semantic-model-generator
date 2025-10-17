@@ -9,34 +9,12 @@ from dataclasses import dataclass
 from enum import Enum
 from io import StringIO
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Final
+from typing import Any, Dict, Final, List, Optional
 
 import pandas as pd
 import streamlit as st
 from PIL import Image
 
-ProgrammingError = Exception
-
-from semantic_model_generator.data_processing.proto_utils import (
-    proto_to_yaml,
-    yaml_to_semantic_model,
-)
-from semantic_model_generator.generate_model import (
-    generate_model_str_from_clickzetta,
-    raw_schema_to_semantic_context,
-    _DEFAULT_N_SAMPLE_VALUES_PER_COL,
-)
-from semantic_model_generator.protos import semantic_model_pb2
-from semantic_model_generator.protos.semantic_model_pb2 import Dimension, Table
-from semantic_model_generator.clickzetta_utils.env_vars import (  # noqa: E402
-    CLICKZETTA_INSTANCE,
-    CLICKZETTA_SERVICE,
-    CLICKZETTA_USERNAME,
-    CLICKZETTA_WORKSPACE,
-    CLICKZETTA_SCHEMA,
-    ACTIVE_CONFIG_PATH,
-    assert_required_env_vars,
-)
 from semantic_model_generator.clickzetta_utils.clickzetta_connector import (
     ClickzettaConnectionProxy,
     ClickzettaConnector,
@@ -48,9 +26,30 @@ from semantic_model_generator.clickzetta_utils.clickzetta_connector import (
     fetch_warehouses,
     fetch_yaml_names_in_stage,
 )
+from semantic_model_generator.clickzetta_utils.env_vars import (  # noqa: E402
+    ACTIVE_CONFIG_PATH,
+    CLICKZETTA_INSTANCE,
+    CLICKZETTA_SCHEMA,
+    CLICKZETTA_SERVICE,
+    CLICKZETTA_USERNAME,
+    CLICKZETTA_WORKSPACE,
+    assert_required_env_vars,
+)
+from semantic_model_generator.data_processing.proto_utils import (
+    proto_to_yaml,
+    yaml_to_semantic_model,
+)
+from semantic_model_generator.generate_model import (
+    _DEFAULT_N_SAMPLE_VALUES_PER_COL,
+    generate_model_str_from_clickzetta,
+    raw_schema_to_semantic_context,
+)
 from semantic_model_generator.llm import get_dashscope_settings
+from semantic_model_generator.protos import semantic_model_pb2
+from semantic_model_generator.protos.semantic_model_pb2 import Dimension, Table
 
 ClickzettaConnection = ClickzettaConnectionProxy
+ProgrammingError = Exception
 
 CLICKZETTA_INSTANCE_ID = CLICKZETTA_INSTANCE or ""
 
@@ -247,7 +246,9 @@ def validate_table_exist(schema: str, table_name: str) -> bool:
     Returns:
         List[str]: A list of available volumes.
     """
-    table_names = fetch_tables_views_in_schema(get_clickzetta_connection().session, schema)
+    table_names = fetch_tables_views_in_schema(
+        get_clickzetta_connection().session, schema
+    )
     table_names = [table.split(".")[2] for table in table_names]
     if table_name.upper() in table_names:
         return True
@@ -363,16 +364,18 @@ def stage_selector_container() -> None:
         "Storage target",
         ("user", "named"),
         index=0 if previous_mode != "named" else 1,
-        format_func=lambda option: "User volume (recommended)"
-        if option == "user"
-        else "Named volume",
+        format_func=lambda option: (
+            "User volume (recommended)" if option == "user" else "Named volume"
+        ),
         key="selected_iteration_storage_mode",
     )
 
     if storage_mode == "user":
         default_dir = st.text_input(
             "User volume directory",
-            value=st.session_state.get("selected_iteration_user_volume_dir", "semantic_models"),
+            value=st.session_state.get(
+                "selected_iteration_user_volume_dir", "semantic_models"
+            ),
             help="Directory path inside your user volume (omit leading and trailing slashes).",
         ).strip()
 
@@ -477,7 +480,9 @@ def set_user_name(
         st.session_state["user_name"] = st.experimental_user.user_name
         return
 
-    resolved_user = clickzetta_user or conn.config.get("username") or CLICKZETTA_USERNAME or ""
+    resolved_user = (
+        clickzetta_user or conn.config.get("username") or CLICKZETTA_USERNAME or ""
+    )
     st.session_state["user_name"] = resolved_user
 
 
@@ -1407,18 +1412,47 @@ def run_generate_model_str_from_clickzetta(
     elif not base_tables:
         raise ValueError("Please select at least one table to proceed.")
     else:
+        # Create progress display with progress bar
         status = st.status(
             "Generating semantic model...",
             state="running",
             expanded=True,
         )
+        progress_bar = st.progress(0)
+        progress_text = st.empty()
+
         status.write("Initializing ClickZetta connection...")
+        progress_text.text("Initializing ClickZetta connection...")
+
         try:
             connection = get_clickzetta_connection()
             status.write("Connection established. Preparing metadata fetch...")
+            progress_text.text("Connection established, preparing metadata fetch...")
+            progress_bar.progress(0.05)
 
             def progress_callback(message: str) -> None:
                 status.write(message)
+                # Extract percentage from enrichment progress messages
+                if "[" in message and "%" in message and "]" in message:
+                    try:
+                        # Extract percentage like "[75%]" from message
+                        start = message.find("[") + 1
+                        end = message.find("%")
+                        if start < end:
+                            percentage = float(message[start:end])
+                            # Convert to 0-1 range for progress bar
+                            # Enrichment starts at 5% and can go up to 95%
+                            final_progress = 0.05 + (percentage / 100.0) * 0.90
+                            progress_bar.progress(min(final_progress, 0.95))
+
+                            # Update progress text with clean message
+                            clean_message = message[message.find("]") + 1 :].strip()
+                            progress_text.text(f"[{percentage:.0f}%] {clean_message}")
+                    except (ValueError, IndexError):
+                        # Fallback to just showing the message
+                        progress_text.text(message)
+                else:
+                    progress_text.text(message)
 
             yaml_str = generate_model_str_from_clickzetta(
                 base_tables=base_tables,
@@ -1441,6 +1475,10 @@ def run_generate_model_str_from_clickzetta(
             raise
         else:
             status.write("Semantic YAML generated. Updating workspace...")
+            progress_text.text(
+                "Semantic model generation complete, updating workspace..."
+            )
+            progress_bar.progress(1.0)
             st.session_state["yaml"] = yaml_str
             status.update(
                 label="Semantic model generated successfully.",
@@ -1466,7 +1504,9 @@ class AppMetadata:
             storage = st.session_state.storage_target
             if storage.is_volume:
                 return storage.stage_name
-            return f"{storage.stage_database}.{storage.stage_schema}.{storage.stage_name}"
+            return (
+                f"{storage.stage_database}.{storage.stage_schema}.{storage.stage_name}"
+            )
         # Fallback to selected iteration volume if available.
         selected = st.session_state.get("selected_iteration_stage")
         if isinstance(selected, str) and selected.strip():
@@ -1484,34 +1524,19 @@ class AppMetadata:
 
     @property
     def instance(self) -> str:
-        return (
-            st.session_state.get("account_name")
-            or CLICKZETTA_INSTANCE or ""
-        )
+        return st.session_state.get("account_name") or CLICKZETTA_INSTANCE or ""
 
     @property
     def service(self) -> str:
-        return (
-            st.session_state.get("host_name")
-            or CLICKZETTA_SERVICE
-            or ""
-        )
+        return st.session_state.get("host_name") or CLICKZETTA_SERVICE or ""
 
     @property
     def workspace(self) -> str:
-        return (
-            st.session_state.get("workspace_name")
-            or CLICKZETTA_WORKSPACE
-            or ""
-        )
+        return st.session_state.get("workspace_name") or CLICKZETTA_WORKSPACE or ""
 
     @property
     def schema(self) -> str:
-        return (
-            st.session_state.get("schema_name")
-            or CLICKZETTA_SCHEMA
-            or ""
-        )
+        return st.session_state.get("schema_name") or CLICKZETTA_SCHEMA or ""
 
     @property
     def config_path(self) -> str:

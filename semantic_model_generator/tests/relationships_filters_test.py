@@ -7,9 +7,24 @@ def test_suggest_filters_builds_in_clause_and_time_filter() -> None:
         id_=0,
         name="ORDERS",
         columns=[
-            Column(id_=0, column_name="status", column_type="STRING", values=["OPEN", "CLOSED", "OPEN"]),
-            Column(id_=1, column_name="order_date", column_type="TIMESTAMP", values=["2024-01-01", "2024-01-15"]),
-            Column(id_=2, column_name="created_at", column_type="STRING", values=["2024-01-05 10:00:00"]),
+            Column(
+                id_=0,
+                column_name="status",
+                column_type="STRING",
+                values=["OPEN", "CLOSED", "OPEN"],
+            ),
+            Column(
+                id_=1,
+                column_name="order_date",
+                column_type="TIMESTAMP",
+                values=["2024-01-01", "2024-01-15"],
+            ),
+            Column(
+                id_=2,
+                column_name="created_at",
+                column_type="STRING",
+                values=["2024-01-05 10:00:00"],
+            ),
         ],
     )
 
@@ -26,7 +41,12 @@ def test_infer_relationships_uses_pk_candidate() -> None:
         id_=0,
         name="CUSTOMERS",
         columns=[
-            Column(id_=0, column_name="customer_id", column_type="INT", values=["1", "2", "3"]),
+            Column(
+                id_=0,
+                column_name="customer_id",
+                column_type="INT",
+                values=["1", "2", "3"],
+            ),
             Column(id_=1, column_name="customer_name", column_type="STRING"),
         ],
     )
@@ -34,15 +54,35 @@ def test_infer_relationships_uses_pk_candidate() -> None:
         id_=1,
         name="ORDERS",
         columns=[
-            Column(id_=0, column_name="order_id", column_type="INT", values=["10", "11", "12"]),
-            Column(id_=1, column_name="customer_id", column_type="INT", values=["1", "2", "1"]),
+            Column(
+                id_=0,
+                column_name="order_id",
+                column_type="INT",
+                values=["10", "11", "12"],
+            ),
+            Column(
+                id_=1,
+                column_name="customer_id",
+                column_type="INT",
+                values=["1", "2", "1"],
+            ),
         ],
     )
 
     relationships = generate_model._infer_relationships(
         [
-            (FQNParts(database="QUICK_START", schema_name="MCP_DEMO", table="CUSTOMERS"), customers_table),
-            (FQNParts(database="QUICK_START", schema_name="MCP_DEMO", table="ORDERS"), orders_table),
+            (
+                FQNParts(
+                    database="QUICK_START", schema_name="MCP_DEMO", table="CUSTOMERS"
+                ),
+                customers_table,
+            ),
+            (
+                FQNParts(
+                    database="QUICK_START", schema_name="MCP_DEMO", table="ORDERS"
+                ),
+                orders_table,
+            ),
         ]
     )
 
@@ -61,23 +101,46 @@ def test_infer_relationships_matches_synonym_keys() -> None:
         id_=0,
         name="ORDERS",
         columns=[
-            Column(id_=0, column_name="o_orderkey", column_type="INT", values=["1", "2", "3"]),
-            Column(id_=1, column_name="o_custkey", column_type="INT", values=["10", "20", "30"]),
+            Column(
+                id_=0,
+                column_name="o_orderkey",
+                column_type="INT",
+                values=["1", "2", "3"],
+            ),
+            Column(
+                id_=1,
+                column_name="o_custkey",
+                column_type="INT",
+                values=["10", "20", "30"],
+            ),
         ],
     )
     lineitem_table = Table(
         id_=1,
         name="LINEITEM",
         columns=[
-            Column(id_=0, column_name="l_orderkey", column_type="INT", values=["1", "1", "2"]),
-            Column(id_=1, column_name="l_linenumber", column_type="INT", values=["1", "2", "1"]),
+            Column(
+                id_=0,
+                column_name="l_orderkey",
+                column_type="INT",
+                values=["1", "1", "2"],
+            ),
+            Column(
+                id_=1,
+                column_name="l_linenumber",
+                column_type="INT",
+                values=["1", "2", "1"],
+            ),
         ],
     )
 
     relationships = generate_model._infer_relationships(
         [
             (FQNParts(database="CAT", schema_name="SCH", table="ORDERS"), orders_table),
-            (FQNParts(database="CAT", schema_name="SCH", table="LINEITEM"), lineitem_table),
+            (
+                FQNParts(database="CAT", schema_name="SCH", table="LINEITEM"),
+                lineitem_table,
+            ),
         ]
     )
 
@@ -95,22 +158,40 @@ def test_infer_relationships_handles_part_supplier() -> None:
         id_=0,
         name="PART",
         columns=[
-            Column(id_=0, column_name="p_partkey", column_type="INT", values=["1", "2", "3"]),
+            Column(
+                id_=0,
+                column_name="p_partkey",
+                column_type="INT",
+                values=["1", "2", "3"],
+            ),
         ],
     )
     partsupp_table = Table(
         id_=1,
         name="PARTSUPP",
         columns=[
-            Column(id_=0, column_name="ps_partkey", column_type="INT", values=["1", "1", "2"]),
-            Column(id_=1, column_name="ps_suppkey", column_type="INT", values=["10", "20", "30"]),
+            Column(
+                id_=0,
+                column_name="ps_partkey",
+                column_type="INT",
+                values=["1", "1", "2"],
+            ),
+            Column(
+                id_=1,
+                column_name="ps_suppkey",
+                column_type="INT",
+                values=["10", "20", "30"],
+            ),
         ],
     )
 
     relationships = generate_model._infer_relationships(
         [
             (FQNParts(database="CAT", schema_name="SCH", table="PART"), part_table),
-            (FQNParts(database="CAT", schema_name="SCH", table="PARTSUPP"), partsupp_table),
+            (
+                FQNParts(database="CAT", schema_name="SCH", table="PARTSUPP"),
+                partsupp_table,
+            ),
         ]
     )
 
@@ -128,15 +209,30 @@ def test_infer_relationships_orders_customer() -> None:
         id_=0,
         name="ORDERS",
         columns=[
-            Column(id_=0, column_name="o_orderkey", column_type="INT", values=["1", "2", "3"]),
-            Column(id_=1, column_name="o_custkey", column_type="INT", values=["10", "20", "30"]),
+            Column(
+                id_=0,
+                column_name="o_orderkey",
+                column_type="INT",
+                values=["1", "2", "3"],
+            ),
+            Column(
+                id_=1,
+                column_name="o_custkey",
+                column_type="INT",
+                values=["10", "20", "30"],
+            ),
         ],
     )
     customer_table = Table(
         id_=1,
         name="CUSTOMER",
         columns=[
-            Column(id_=0, column_name="c_custkey", column_type="INT", values=["10", "20", "30"]),
+            Column(
+                id_=0,
+                column_name="c_custkey",
+                column_type="INT",
+                values=["10", "20", "30"],
+            ),
             Column(id_=1, column_name="c_name", column_type="STRING"),
         ],
     )
@@ -144,7 +240,10 @@ def test_infer_relationships_orders_customer() -> None:
     relationships = generate_model._infer_relationships(
         [
             (FQNParts(database="CAT", schema_name="SCH", table="ORDERS"), orders_table),
-            (FQNParts(database="CAT", schema_name="SCH", table="CUSTOMER"), customer_table),
+            (
+                FQNParts(database="CAT", schema_name="SCH", table="CUSTOMER"),
+                customer_table,
+            ),
         ]
     )
 
@@ -162,23 +261,44 @@ def test_infer_relationships_lineitem_supplier() -> None:
         id_=0,
         name="LINEITEM",
         columns=[
-            Column(id_=0, column_name="l_orderkey", column_type="INT", values=["1", "2", "3"]),
-            Column(id_=1, column_name="l_suppkey", column_type="INT", values=["100", "101", "102"]),
+            Column(
+                id_=0,
+                column_name="l_orderkey",
+                column_type="INT",
+                values=["1", "2", "3"],
+            ),
+            Column(
+                id_=1,
+                column_name="l_suppkey",
+                column_type="INT",
+                values=["100", "101", "102"],
+            ),
         ],
     )
     supplier_table = Table(
         id_=1,
         name="SUPPLIER",
         columns=[
-            Column(id_=0, column_name="s_suppkey", column_type="INT", values=["100", "101", "102"]),
+            Column(
+                id_=0,
+                column_name="s_suppkey",
+                column_type="INT",
+                values=["100", "101", "102"],
+            ),
             Column(id_=1, column_name="s_name", column_type="STRING"),
         ],
     )
 
     relationships = generate_model._infer_relationships(
         [
-            (FQNParts(database="CAT", schema_name="SCH", table="LINEITEM"), lineitem_table),
-            (FQNParts(database="CAT", schema_name="SCH", table="SUPPLIER"), supplier_table),
+            (
+                FQNParts(database="CAT", schema_name="SCH", table="LINEITEM"),
+                lineitem_table,
+            ),
+            (
+                FQNParts(database="CAT", schema_name="SCH", table="SUPPLIER"),
+                supplier_table,
+            ),
         ]
     )
 
@@ -196,7 +316,13 @@ def test_infer_relationships_handles_suffix_based_foreign_keys() -> None:
         id_=0,
         name="DIM_DATE",
         columns=[
-            Column(id_=0, column_name="date_id", column_type="INT", values=["20240101", "20240102"], is_primary_key=True),
+            Column(
+                id_=0,
+                column_name="date_id",
+                column_type="INT",
+                values=["20240101", "20240102"],
+                is_primary_key=True,
+            ),
             Column(id_=1, column_name="date_value", column_type="DATE"),
         ],
     )
@@ -204,15 +330,25 @@ def test_infer_relationships_handles_suffix_based_foreign_keys() -> None:
         id_=1,
         name="FACT_SALES",
         columns=[
-            Column(id_=0, column_name="order_id", column_type="INT", values=["10", "11"]),
-            Column(id_=1, column_name="order_date_id", column_type="INT", values=["20240101", "20240102"]),
+            Column(
+                id_=0, column_name="order_id", column_type="INT", values=["10", "11"]
+            ),
+            Column(
+                id_=1,
+                column_name="order_date_id",
+                column_type="INT",
+                values=["20240101", "20240102"],
+            ),
         ],
     )
 
     relationships = generate_model._infer_relationships(
         [
             (FQNParts(database="CAT", schema_name="SCH", table="DIM_DATE"), dim_date),
-            (FQNParts(database="CAT", schema_name="SCH", table="FACT_SALES"), fact_sales),
+            (
+                FQNParts(database="CAT", schema_name="SCH", table="FACT_SALES"),
+                fact_sales,
+            ),
         ]
     )
 
