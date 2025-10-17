@@ -176,3 +176,47 @@ def test_discover_relationships_from_table_definitions_filters_generic_ids() -> 
 
     assert result.summary.total_relationships_found == 0
     assert not result.relationships
+
+
+def test_table_definitions_support_fully_qualified_names() -> None:
+    payload = [
+        {
+            "table_name": "demo.sales.orders",
+            "columns": [
+                {"name": "order_id", "type": "NUMBER", "is_primary_key": True},
+                {"name": "customer_id", "type": "NUMBER"},
+            ],
+        },
+        {
+            "table_name": "sales.customers",
+            "workspace": "demo",
+            "columns": [
+                {"name": "customer_id", "type": "NUMBER", "is_primary_key": True},
+                {"name": "name", "type": "STRING"},
+            ],
+        },
+        {
+            "table_name": "products",
+            "workspace": "demo",
+            "schema": "sales",
+            "columns": [
+                {"name": "product_id", "type": "NUMBER", "is_primary_key": True},
+                {"name": "name", "type": "STRING"},
+            ],
+        },
+    ]
+
+    result = discover_relationships_from_table_definitions(
+        payload,
+        default_workspace="fallback",
+        default_schema="fallback_schema",
+    )
+
+    table_names = {table.name for table in result.tables}
+    assert table_names == {"ORDERS", "CUSTOMERS", "PRODUCTS"}
+
+    # Ensure relationships include the orders -> customers edge despite mixed identifiers
+    assert any(
+        rel.left_table == "ORDERS" and rel.right_table == "CUSTOMERS"
+        for rel in result.relationships
+    )

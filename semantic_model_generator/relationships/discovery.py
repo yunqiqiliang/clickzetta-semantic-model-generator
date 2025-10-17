@@ -112,21 +112,35 @@ def _tables_payload_to_raw_tables(
         if not isinstance(table_entry, Mapping):
             raise TypeError("Each table definition must be a mapping of table metadata")
 
-        table_name = str(
+        raw_table_identifier = str(
             table_entry.get("table_name")
             or table_entry.get("name")
             or table_entry.get("table")
             or ""
         ).strip()
-        if not table_name:
+        if not raw_table_identifier:
             raise ValueError("Table definition missing 'table_name'")
 
-        workspace = str(table_entry.get("workspace") or default_workspace).strip() or default_workspace
+        identifier_workspace, identifier_schema, identifier_table = _split_table_identifier(
+            raw_table_identifier
+        )
+
+        workspace = str(
+            table_entry.get("workspace")
+            or table_entry.get("database")
+            or identifier_workspace
+            or default_workspace
+        ).strip() or default_workspace
         schema = str(
             table_entry.get("schema")
             or table_entry.get("schema_name")
+            or identifier_schema
             or default_schema
         ).strip() or default_schema
+
+        table_name = identifier_table.strip()
+        if not table_name:
+            raise ValueError(f"Unable to parse table name from '{raw_table_identifier}'")
 
         columns_payload = table_entry.get("columns")
         if not isinstance(columns_payload, Sequence) or not columns_payload:
@@ -370,3 +384,19 @@ def discover_relationships_from_schema(
         timeout_seconds=timeout_seconds,
         max_tables=max_tables,
     )
+def _split_table_identifier(identifier: str) -> Tuple[Optional[str], Optional[str], str]:
+    """
+    Split a table identifier that may include workspace/schema prefixes.
+
+    Supported formats:
+      - workspace.schema.table
+      - schema.table
+      - table
+    """
+
+    parts = [part.strip() for part in identifier.split(".") if part.strip()]
+    if len(parts) == 3:
+        return parts[0], parts[1], parts[2]
+    if len(parts) == 2:
+        return None, parts[0], parts[1]
+    return None, None, parts[0]
