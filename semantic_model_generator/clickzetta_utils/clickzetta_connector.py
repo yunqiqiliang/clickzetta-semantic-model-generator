@@ -481,7 +481,7 @@ def _fetch_columns_via_show(
 
     rows: List[pd.DataFrame] = []
     category = _catalog_category(session, workspace)
-    is_shared_catalog = category == "SHARED"
+    is_shared_catalog = category in {"SHARED", "EXTERNAL"}
     catalog = workspace if is_shared_catalog else workspace.upper()
     schema = (
         table_schema or ""
@@ -662,7 +662,7 @@ def fetch_tables_views_in_schema(
     workspace = parts[0]
     schema = parts[1] if len(parts) > 1 else ""
     category = _catalog_category(session, workspace)
-    is_shared_catalog = category == "SHARED"
+    is_shared_catalog = category in {"SHARED", "EXTERNAL"}
 
     workspace_token = workspace if is_shared_catalog else workspace.upper()
     schema_token = schema if is_shared_catalog else schema.upper()
