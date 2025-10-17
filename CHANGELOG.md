@@ -2,20 +2,17 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
-## [1.0.4] - 2025-10-17
+## [1.0.5] - 2025-10-17
 
-### Enhancements
+### Fixes
 
-- Added offline-friendly relationship discovery via `discover_relationships_from_table_definitions()`, enabling MCP `source_type="tables"` requests without a ClickZetta session.
-- Introduced runtime guardrails for large schemas (`max_relationships`, `max_tables`, `timeout_seconds`) and surfaced summary flags so clients can detect partial results.
-- Tightened relationship confidence scoring by penalising generic identifiers and raising the default confidence floor to 0.5, reducing false positives in wide schemas.
-- Extended detailed responses to include guardrail metadata and documentation updates so integrators know how to react to truncated runs.
+- Treat ClickZetta `EXTERNAL` catalogs the same as `SHARED` in metadata fallbacks so `SHOW TABLES/COLUMNS` now uses the correct `IN SHARE` variant.
 
 ### Testing
 
 - `POETRY_CACHE_DIR=.poetry-cache poetry run pytest -q`
 
-## [1.0.3] - 2025-10-17
+## [1.0.4] - 2025-10-17
 
 ### Compatibility
 
