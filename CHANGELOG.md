@@ -2,17 +2,17 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
-## [1.0.5] - 2025-10-17
+## [1.0.6] - 2025-10-17
 
 ### Fixes
 
-- Treat ClickZetta `EXTERNAL` catalogs the same as `SHARED` in metadata fallbacks so `SHOW TABLES/COLUMNS` now uses the correct `IN SHARE` variant.
+- Include external tables (`TABLE_TYPE = EXTERNAL_TABLE`) when enumerating schema objects so relationship discovery picks up managed external sources.
 
 ### Testing
 
 - `POETRY_CACHE_DIR=.poetry-cache poetry run pytest -q`
 
-## [1.0.4] - 2025-10-17
+## [1.0.5] - 2025-10-17
 
 ### Compatibility
 
