@@ -4,7 +4,7 @@ import concurrent.futures
 import re
 from collections import defaultdict
 from contextlib import contextmanager
-from typing import Any, Dict, Generator, List, Optional, TypeVar, Union
+from typing import Any, Dict, Generator, List, Optional, Tuple, TypeVar, Union
 
 import pandas as pd
 from clickzetta.zettapark.session import Session
@@ -491,21 +491,30 @@ def _fetch_columns_via_show(
             continue
 
         identifier_candidates: List[str] = []
-        fully_qualified = join_quoted_identifiers(
-            *(part for part in (catalog, schema_token, table_token) if part)
-        )
-        if fully_qualified:
-            identifier_candidates.append(fully_qualified)
-        schema_qualified = (
-            join_quoted_identifiers(schema_token, table_token)
-            if schema_token
-            else ""
-        )
-        if schema_qualified:
-            identifier_candidates.append(schema_qualified)
-        bare_identifier = join_quoted_identifiers(table_token)
-        if bare_identifier:
-            identifier_candidates.append(bare_identifier)
+        seen_identifiers: set[str] = set()
+
+        def _add_identifier(parts: Tuple[str, ...], *, quoted: bool) -> None:
+            tokens = [part.strip() for part in parts if part and part.strip()]
+            if not tokens:
+                return
+            if quoted:
+                identifier = ".".join(quote_identifier(token) for token in tokens)
+            else:
+                identifier = ".".join(tokens)
+            if identifier and identifier not in seen_identifiers:
+                identifier_candidates.append(identifier)
+                seen_identifiers.add(identifier)
+
+        raw_parts = (catalog, schema_token, table_token)
+        schema_parts = (schema_token, table_token)
+        table_parts = (table_token,)
+
+        _add_identifier(raw_parts, quoted=False)
+        _add_identifier(schema_parts, quoted=False)
+        _add_identifier(table_parts, quoted=False)
+        _add_identifier(raw_parts, quoted=True)
+        _add_identifier(schema_parts, quoted=True)
+        _add_identifier(table_parts, quoted=True)
 
         df = pd.DataFrame()
         df_source = ""
