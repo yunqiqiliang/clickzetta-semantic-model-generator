@@ -715,8 +715,6 @@ def fetch_tables_views_in_schema(
             row.get("IS_MATERIALIZED_VIEW")
         ):
             continue
-        if _value_is_true(row.get("IS_EXTERNAL")):
-            continue
         # keep materialized views
         catalog_part = _sanitize_identifier(
             row[catalog_column] if catalog_column else workspace, workspace
