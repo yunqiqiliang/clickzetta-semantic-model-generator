@@ -86,3 +86,86 @@ def test_get_valid_columns_falls_back_to_show_columns():
     assert not df.empty
     assert df["TABLE_NAME"].iloc[0] == "PARTSUPP"
     assert df["COLUMN_NAME"].iloc[0] == "PS_PARTKEY"
+
+
+def test_get_valid_columns_handles_fully_qualified_filters():
+    class DummyResult:
+        def __init__(self, df: pd.DataFrame):
+            self._df = df
+
+        def to_pandas(self) -> pd.DataFrame:
+            return self._df
+
+    table_df = pd.DataFrame(
+        {
+            "schema_name": ["S1"],
+            "table_name": ["TABLE_ONE"],
+            "column_name": ["ID"],
+            "data_type": ["INT"],
+            "comment": [""],
+        }
+    )
+
+    call_log: list[str] = []
+
+    def sql_side_effect(query: str):
+        call_log.append(query)
+        if "information_schema" in query:
+            raise RuntimeError("info schema unavailable")
+        if query == "SHOW COLUMNS IN TEST_WS.S1.TABLE_ONE":
+            return DummyResult(table_df)
+        raise RuntimeError("unsupported query")
+
+    session = mock.MagicMock()
+    session.sql.side_effect = sql_side_effect
+    connector._CATALOG_CATEGORY_CACHE.clear()
+
+    df = connector.get_valid_schemas_tables_columns_df(
+        session=session,
+        workspace="TEST_WS",
+        table_schema="S1",
+        table_names=["TEST_WS.S1.TABLE_ONE"],
+    )
+
+    assert not df.empty
+    assert any("SHOW COLUMNS IN TEST_WS.S1.TABLE_ONE" in q for q in call_log)
+    assert all("TEST_WS.S1.TEST_WS.S1" not in q for q in call_log)
+
+
+def test_fetch_tables_views_in_schema_shared_catalog_does_not_use_share_clause():
+    class DummyResult:
+        def __init__(self, df: pd.DataFrame):
+            self._df = df
+
+        def to_pandas(self) -> pd.DataFrame:
+            return self._df
+
+    tables_df = pd.DataFrame(
+        {
+            "workspace_name": ["lakehouse_ai"],
+            "schema_name": ["schema_for_opencatalog"],
+            "table_name": ["czcustomer"],
+            "is_view": [False],
+            "is_materialized_view": [False],
+        }
+    )
+
+    executed_queries: list[str] = []
+
+    def sql_side_effect(query: str):
+        executed_queries.append(query)
+        if query.startswith("SHOW TABLES IN"):
+            return DummyResult(tables_df)
+        raise RuntimeError("Unexpected query")
+
+    session = mock.MagicMock()
+    session.sql.side_effect = sql_side_effect
+    connector._CATALOG_CATEGORY_CACHE.clear()
+
+    with mock.patch.object(connector, "_catalog_category", return_value="SHARED"):
+        tables = connector.fetch_tables_views_in_schema(
+            session=session, schema_name="lakehouse_ai.schema_for_opencatalog"
+        )
+
+    assert tables == ["lakehouse_ai.schema_for_opencatalog.czcustomer"]
+    assert all("IN SHARE" not in query for query in executed_queries)

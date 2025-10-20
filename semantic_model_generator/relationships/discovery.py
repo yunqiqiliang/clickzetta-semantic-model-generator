@@ -50,7 +50,15 @@ class RelationshipDiscoveryResult:
 def _normalize_table_names(table_names: Optional[Iterable[str]]) -> Optional[List[str]]:
     if table_names is None:
         return None
-    return [name.upper() for name in table_names]
+    normalized: List[str] = []
+    for name in table_names:
+        parts = [
+            part.strip().strip("`").strip('"')
+            for part in str(name).split(".")
+            if part and part.strip()
+        ]
+        normalized.append(".".join(parts))
+    return normalized
 
 
 def _build_tables_from_dataframe(
@@ -350,7 +358,7 @@ def discover_relationships_from_schema(
 
     if metadata_df.empty:
         logger.warning(
-            "No column metadata found for workspace=%s schema=%s tables=%s",
+            "No column metadata found for workspace={} schema={} tables={}",
             workspace,
             schema,
             table_names,

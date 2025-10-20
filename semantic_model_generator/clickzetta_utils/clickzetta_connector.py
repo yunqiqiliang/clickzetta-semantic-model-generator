@@ -176,6 +176,25 @@ def _sanitize_identifier(value: Any, fallback: str = "") -> str:
     return normalized
 
 
+def _split_identifier(
+    identifier: Any,
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """
+    Split a potentially qualified identifier into catalog, schema, and table parts.
+    Returns normalized segments without surrounding quotes/backticks.
+    """
+
+    text = normalize_identifier(identifier)
+    if not text:
+        return None, None, None
+    parts = [part.strip() for part in text.split(".") if part.strip()]
+    if len(parts) >= 3:
+        return parts[-3], parts[-2], parts[-1]
+    if len(parts) == 2:
+        return None, parts[0], parts[1]
+    return None, None, parts[0]
+
+
 def _normalize_column_type(raw: Any) -> str:
     if raw is None:
         return ""
@@ -449,8 +468,14 @@ def _build_information_schema_query(
     if table_schema:
         where_conditions.append(f"upper(t.table_schema) = '{table_schema.upper()}'")
     if table_names:
-        formatted_names = ", ".join(f"'{name.upper()}'" for name in table_names)
-        where_conditions.append(f"upper(t.table_name) IN ({formatted_names})")
+        normalized_names: List[str] = []
+        for name in table_names:
+            _, _, table_only = _split_identifier(name)
+            if table_only:
+                normalized_names.append(table_only.upper())
+        if normalized_names:
+            formatted_names = ", ".join(f"'{name}'" for name in normalized_names)
+            where_conditions.append(f"upper(t.table_name) IN ({formatted_names})")
 
     where_clause = " AND ".join(where_conditions)
     return f"""
@@ -490,6 +515,14 @@ def _fetch_columns_via_show(
         if not table_token:
             continue
 
+        override_catalog, override_schema, override_table = _split_identifier(table_token)
+        table_leaf = override_table or table_token
+        if not table_leaf:
+            continue
+
+        catalog_token = override_catalog or catalog
+        schema_token_override = override_schema or schema_token
+
         identifier_candidates: List[str] = []
         seen_identifiers: set[str] = set()
 
@@ -505,9 +538,9 @@ def _fetch_columns_via_show(
                 identifier_candidates.append(identifier)
                 seen_identifiers.add(identifier)
 
-        raw_parts = (catalog, schema_token, table_token)
-        schema_parts = (schema_token, table_token)
-        table_parts = (table_token,)
+        raw_parts = (catalog_token, schema_token_override, table_leaf)
+        schema_parts = (schema_token_override, table_leaf)
+        table_parts = (table_leaf,)
 
         _add_identifier(raw_parts, quoted=False)
         _add_identifier(schema_parts, quoted=False)
@@ -582,10 +615,10 @@ def _fetch_columns_via_show(
         normalized[_TABLE_SCHEMA_COL] = (
             df[schema_col]
             if schema_col
-            else (schema_token or table_schema or "")
+            else (schema_token_override or table_schema or "")
         )
         normalized[_TABLE_NAME_COL] = (
-            df[table_col] if table_col else table_token
+            df[table_col] if table_col else table_leaf
         )
         normalized[_COLUMN_NAME_COL] = (
             df[column_col] if column_col else df.index.astype(str)
@@ -738,17 +771,11 @@ def fetch_tables_views_in_schema(
 
     try:
         if workspace_token and schema_token:
-            if is_shared_catalog:
-                scope = ".".join(
-                    part for part in (workspace_token, schema_token) if part
-                )
-                df = session.sql(f"SHOW TABLES IN SHARE {scope}").to_pandas()
-            else:
-                scope = join_quoted_identifiers(
-                    workspace_token,
-                    schema_token,
-                )
-                df = session.sql(f"SHOW TABLES IN {scope}").to_pandas()
+            scope = join_quoted_identifiers(
+                workspace_token,
+                schema_token,
+            )
+            df = session.sql(f"SHOW TABLES IN {scope}").to_pandas()
         else:
             df = session.sql("SHOW TABLES").to_pandas()
     except Exception as exc:  # pragma: no cover

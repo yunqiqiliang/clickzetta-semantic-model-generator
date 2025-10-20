@@ -2,6 +2,27 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.16] - 2025-10-20
+
+### Fixes
+
+- Switch schema discovery’s empty-metadata warning to Loguru-style `{}` placeholders so workspace/schema/table identifiers appear in logs for troubleshooting MCP requests.
+
+### Testing
+
+- `POETRY_CACHE_DIR=.poetry-cache poetry run pytest -q`
+
+## [1.0.15] - 2025-10-20
+
+### Fixes
+
+- Accept fully qualified table filters when collecting metadata, preventing repeated workspace/schema prefixes from breaking `SHOW COLUMNS` fallbacks.
+- Use shared catalog casing with standard `SHOW TABLES IN <workspace>.<schema>` so enumerating external tables no longer triggers `IN SHARE` syntax errors.
+
+### Testing
+
+- `POETRY_CACHE_DIR=.poetry-cache poetry run pytest -q`
+
 ## [1.0.14] - 2025-10-20
 
 ### Fixes
