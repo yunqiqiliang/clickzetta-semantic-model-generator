@@ -491,33 +491,52 @@ def _fetch_columns_via_show(
         table_token = str(table_name).strip()
         if not table_token:
             continue
-        qualified_table = join_quoted_identifiers(
+
+        identifier_candidates: List[str] = []
+        fully_qualified = join_quoted_identifiers(
             *(part for part in (catalog, schema_token, table_token) if part)
         )
-        query = f"SHOW COLUMNS IN {qualified_table}"
-        df_source = "SHOW COLUMNS"
-        try:
-            df = session.sql(query).to_pandas()
-        except Exception as exc:
-            logger.debug(
-                "SHOW COLUMNS fallback failed for {}: {}", qualified_table, exc
-            )
-            df = pd.DataFrame()
-        if df.empty:
-            describe_query = f"DESCRIBE TABLE {qualified_table}"
+        if fully_qualified:
+            identifier_candidates.append(fully_qualified)
+        schema_qualified = (
+            join_quoted_identifiers(schema_token, table_token)
+            if schema_token
+            else ""
+        )
+        if schema_qualified:
+            identifier_candidates.append(schema_qualified)
+        bare_identifier = join_quoted_identifiers(table_token)
+        if bare_identifier:
+            identifier_candidates.append(bare_identifier)
+
+        df = pd.DataFrame()
+        df_source = ""
+        for identifier in identifier_candidates:
+            query = f"SHOW COLUMNS IN {identifier}"
             try:
-                describe_df = session.sql(describe_query).to_pandas()
+                df = session.sql(query).to_pandas()
+                df_source = "SHOW COLUMNS"
             except Exception as exc:
                 logger.debug(
-                    "DESCRIBE TABLE fallback failed for {}: {}", qualified_table, exc
+                    "SHOW COLUMNS fallback failed for {}: {}", identifier, exc
                 )
-                describe_df = pd.DataFrame()
-            if not describe_df.empty:
-                df_source = "DESCRIBE TABLE"
-                df = describe_df
+                df = pd.DataFrame()
+            if df.empty:
+                describe_query = f"DESCRIBE TABLE {identifier}"
+                try:
+                    describe_df = session.sql(describe_query).to_pandas()
+                except Exception as exc:
+                    logger.debug(
+                        "DESCRIBE TABLE fallback failed for {}: {}", identifier, exc
+                    )
+                    describe_df = pd.DataFrame()
+                if not describe_df.empty:
+                    df = describe_df
+                    df_source = "DESCRIBE TABLE"
+            if not df.empty:
+                break
         if df.empty:
             continue
-        df.columns = [str(col).upper() for col in df.columns]
         if df_source == "DESCRIBE TABLE":
             if "KIND" in df.columns:
                 df = df[df["KIND"].astype(str).str.upper() == "COLUMN"]
@@ -530,6 +549,7 @@ def _fetch_columns_via_show(
                 df = df.rename(columns=rename_map)
             if df.empty:
                 continue
+        df.columns = [str(col).upper() for col in df.columns]
         schema_col = next(
             (col for col in ("TABLE_SCHEMA", "SCHEMA_NAME") if col in df.columns), None
         )

@@ -2,6 +2,16 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.12] - 2025-10-17
+
+### Fixes
+
+- Attempt multiple identifier forms (`catalog.schema.table`, `schema.table`, `table`) when falling back to `SHOW COLUMNS`/`DESCRIBE TABLE`, covering external tables that only respond to unqualified names.
+
+### Testing
+
+- `POETRY_CACHE_DIR=.poetry-cache poetry run pytest -q`
+
 ## [1.0.11] - 2025-10-17
 
 ### Fixes
