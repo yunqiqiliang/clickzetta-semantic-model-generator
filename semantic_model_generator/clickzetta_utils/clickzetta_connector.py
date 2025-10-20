@@ -482,10 +482,8 @@ def _fetch_columns_via_show(
     rows: List[pd.DataFrame] = []
     category = _catalog_category(session, workspace)
     is_shared_catalog = category == "SHARED"
-    catalog = workspace if is_shared_catalog else workspace.upper()
+    catalog = workspace
     schema_token = table_schema or ""
-    if schema_token and not is_shared_catalog:
-        schema_token = schema_token.upper()
 
     for table_name in table_names:
         table_token = str(table_name).strip()

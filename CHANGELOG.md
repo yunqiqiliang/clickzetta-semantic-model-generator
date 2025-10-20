@@ -2,6 +2,16 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.13] - 2025-10-20
+
+### Fixes
+
+- Preserve original workspace/schema casing when issuing `SHOW COLUMNS` / `DESCRIBE TABLE` so managed catalogs with lowercase names return external table metadata.
+
+### Testing
+
+- `POETRY_CACHE_DIR=.poetry-cache poetry run pytest -q`
+
 ## [1.0.12] - 2025-10-17
 
 ### Fixes
