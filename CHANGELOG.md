@@ -2,6 +2,16 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.11] - 2025-10-17
+
+### Fixes
+
+- Fallback to `DESCRIBE TABLE` when `SHOW COLUMNS` returns no results so external tables without column metadata in information schema are still analysed.
+
+### Testing
+
+- `POETRY_CACHE_DIR=.poetry-cache poetry run pytest -q`
+
 ## [1.0.10] - 2025-10-17
 
 ### Fixes

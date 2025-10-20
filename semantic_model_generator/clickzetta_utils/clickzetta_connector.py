@@ -495,16 +495,41 @@ def _fetch_columns_via_show(
             *(part for part in (catalog, schema_token, table_token) if part)
         )
         query = f"SHOW COLUMNS IN {qualified_table}"
+        df_source = "SHOW COLUMNS"
         try:
             df = session.sql(query).to_pandas()
         except Exception as exc:
             logger.debug(
                 "SHOW COLUMNS fallback failed for {}: {}", qualified_table, exc
             )
-            continue
+            df = pd.DataFrame()
+        if df.empty:
+            describe_query = f"DESCRIBE TABLE {qualified_table}"
+            try:
+                describe_df = session.sql(describe_query).to_pandas()
+            except Exception as exc:
+                logger.debug(
+                    "DESCRIBE TABLE fallback failed for {}: {}", qualified_table, exc
+                )
+                describe_df = pd.DataFrame()
+            if not describe_df.empty:
+                df_source = "DESCRIBE TABLE"
+                df = describe_df
         if df.empty:
             continue
         df.columns = [str(col).upper() for col in df.columns]
+        if df_source == "DESCRIBE TABLE":
+            if "KIND" in df.columns:
+                df = df[df["KIND"].astype(str).str.upper() == "COLUMN"]
+            rename_map = {}
+            if "NAME" in df.columns:
+                rename_map["NAME"] = "COLUMN_NAME"
+            if "TYPE" in df.columns:
+                rename_map["TYPE"] = "DATA_TYPE"
+            if rename_map:
+                df = df.rename(columns=rename_map)
+            if df.empty:
+                continue
         schema_col = next(
             (col for col in ("TABLE_SCHEMA", "SCHEMA_NAME") if col in df.columns), None
         )
@@ -527,8 +552,14 @@ def _fetch_columns_via_show(
         )
 
         normalized = pd.DataFrame()
-        normalized[_TABLE_SCHEMA_COL] = df[schema_col] if schema_col else table_schema
-        normalized[_TABLE_NAME_COL] = df[table_col] if table_col else table_name
+        normalized[_TABLE_SCHEMA_COL] = (
+            df[schema_col]
+            if schema_col
+            else (schema_token or table_schema or "")
+        )
+        normalized[_TABLE_NAME_COL] = (
+            df[table_col] if table_col else table_token
+        )
         normalized[_COLUMN_NAME_COL] = (
             df[column_col] if column_col else df.index.astype(str)
         )
