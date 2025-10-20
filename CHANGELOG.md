@@ -2,6 +2,16 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.10] - 2025-10-17
+
+### Fixes
+
+- Build `SHOW COLUMNS` queries using quoted identifiers so schema fallback works with case-sensitive external tables.
+
+### Testing
+
+- `POETRY_CACHE_DIR=.poetry-cache poetry run pytest -q`
+
 ## [1.0.9] - 2025-10-17
 
 ### Fixes

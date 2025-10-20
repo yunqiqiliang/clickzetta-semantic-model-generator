@@ -483,27 +483,18 @@ def _fetch_columns_via_show(
     category = _catalog_category(session, workspace)
     is_shared_catalog = category == "SHARED"
     catalog = workspace if is_shared_catalog else workspace.upper()
-    schema = (
-        table_schema or ""
-    )
-    if schema and not is_shared_catalog:
-        schema = schema.upper()
+    schema_token = table_schema or ""
+    if schema_token and not is_shared_catalog:
+        schema_token = schema_token.upper()
 
     for table_name in table_names:
-        qualified_parts = [
-            part
-            for part in (
-                catalog,
-                schema,
-                table_name.upper() if not is_shared_catalog else table_name,
-            )
-            if part
-        ]
-        qualified_table = ".".join(qualified_parts)
-        if is_shared_catalog:
-            query = f"SHOW COLUMNS IN SHARE {qualified_table}"
-        else:
-            query = f"SHOW COLUMNS IN {qualified_table}"
+        table_token = str(table_name).strip()
+        if not table_token:
+            continue
+        qualified_table = join_quoted_identifiers(
+            *(part for part in (catalog, schema_token, table_token) if part)
+        )
+        query = f"SHOW COLUMNS IN {qualified_table}"
         try:
             df = session.sql(query).to_pandas()
         except Exception as exc:
