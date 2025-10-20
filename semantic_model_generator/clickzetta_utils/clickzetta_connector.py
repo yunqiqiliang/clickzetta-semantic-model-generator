@@ -581,11 +581,31 @@ def get_valid_schemas_tables_columns_df(
             result = pd.DataFrame()
 
     if result.empty:
+        tables_for_show = table_names
+        if not tables_for_show:
+            try:
+                schema_identifier = (
+                    f"{workspace}.{table_schema}" if table_schema else workspace
+                )
+                tables_for_show = fetch_tables_views_in_schema(
+                    session=session, schema_name=schema_identifier
+                )
+                tables_for_show = [
+                    table.split(".")[-1].upper()
+                    for table in tables_for_show
+                    if table
+                ]
+            except Exception as exc:  # pragma: no cover - defensive logging
+                logger.debug(
+                    "Unable to enumerate tables for SHOW COLUMNS fallback: {}", exc
+                )
+                tables_for_show = None
+
         result = _fetch_columns_via_show(
             session=session,
             workspace=workspace,
             table_schema=table_schema,
-            table_names=table_names,
+            table_names=tables_for_show,
         )
 
     if result.empty:
