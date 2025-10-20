@@ -2,17 +2,17 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
-## [1.0.6] - 2025-10-17
+## [1.0.7] - 2025-10-17
 
 ### Fixes
 
-- Include external tables (`TABLE_TYPE = EXTERNAL_TABLE`) when enumerating schema objects so relationship discovery picks up managed external sources.
+- When discovering relationships for an entire schema, enumerate tables via `SHOW TABLES` before falling back to `SHOW COLUMNS`, ensuring external tables without information schema rows are analyzed.
 
 ### Testing
 
 - `POETRY_CACHE_DIR=.poetry-cache poetry run pytest -q`
 
-## [1.0.5] - 2025-10-17
+## [1.0.6] - 2025-10-17
 
 ### Compatibility
 
