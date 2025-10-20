@@ -2,6 +2,26 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.9] - 2025-10-17
+
+### Fixes
+
+- Preserve original table names when falling back to `SHOW COLUMNS` so case-sensitive external tables resolve correctly.
+
+### Testing
+
+- `POETRY_CACHE_DIR=.poetry-cache poetry run pytest -q`
+
+## [1.0.8] - 2025-10-17
+
+### Fixes
+
+- Treat `EXTERNAL` catalogs like managed workspaces when querying metadata so both information schema and `SHOW` fallbacks are used without forcing `IN SHARE` semantics.
+
+### Testing
+
+- `POETRY_CACHE_DIR=.poetry-cache poetry run pytest -q`
+
 ## [1.0.7] - 2025-10-17
 
 ### Fixes
