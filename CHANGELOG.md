@@ -2,6 +2,76 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.47] - 2025-10-21
+
+### Accuracy Enhancement - Filter Out Non-Key Columns from Relationship Matching
+
+- **Added intelligent column exclusion to prevent false positive relationships**: System now excludes timestamp, content, and measurement fields from FK-PK matching
+  - Problem: False positives like `users.created_at = post_tags.created_at` or `comments.content = posts.content`
+  - Impact: Improved test results from 19/22 to 20/22 (90.9% passing)
+  - Solution: New `_should_exclude_from_relationship_matching()` function filters unsuitable columns
+  - No regression: TPC-H still discovers 10/10 relationships ✓
+
+### Technical Details
+
+**Excluded Column Categories**:
+1. **Timestamp/Date fields**: `created_at`, `updated_at`, `deleted_at`, `modified_at`, etc.
+2. **Content/Text fields**: `description`, `content`, `comment`, `notes`, `text`, `body`, etc.
+3. **Measurement fields**: `amount`, `price`, `cost`, `quantity` (without ID/KEY suffix)
+
+**Smart Exceptions**:
+- `date_key`, `time_id` are still valid (they're identifiers, not timestamps)
+- Fields with `*_DATE_KEY`, `*_TIME_ID` patterns are preserved
+- Maintains all previously correct relationship logic
+
+**Implementation**:
+```python
+def _should_exclude_from_relationship_matching(column_name: str, base_type: str = None) -> bool:
+    """
+    Prevents false positive matches by excluding columns that shouldn't be used for relationships.
+    Returns True if column should be EXCLUDED from matching.
+    """
+    # Exclude timestamp patterns: CREATED_AT, UPDATED_AT, etc.
+    # Exclude content patterns: DESCRIPTION, CONTENT, COMMENT, etc.
+    # Exclude measurement patterns: AMOUNT, PRICE, QUANTITY (without ID suffix)
+    # Allow exceptions: date_key, time_id (identifiers)
+```
+
+**Applied at Two Points**:
+- Line 913-916: Before FK column iteration (prevents FK side matching)
+- Line 939-941: Before PK candidate matching (prevents PK side matching)
+
+### Impact
+
+- **Reduced false positives**: No more timestamp or content field relationships
+- **Improved accuracy**: 19/22 → 20/22 tests passing (86.4% → 90.9%)
+- **No regression**: TPC-H benchmark still 10/10 ✓
+- **Preserved valid patterns**: `date_key` relationships still work correctly
+
+### Examples
+
+**False Positives Prevented**:
+- ❌ `users.created_at = post_tags.created_at` → Now excluded
+- ❌ `comments.content = posts.content` → Now excluded
+- ❌ `orders.amount = line_items.amount` → Now excluded
+
+**Valid Patterns Preserved**:
+- ✅ `fact_orders.date_key = dim_date.date_key` → Still works
+- ✅ `events.time_id = time_dimension.time_id` → Still works
+- ✅ All TPC-H relationships → Still discovered correctly
+
+### Test Results
+
+- 20/22 tests passing (90.9%)
+- TPC-H test: PASSED ✓ (10/10 relationships)
+- Star schema test: PASSED ✓ (date_key preserved)
+- Sample data inference tests: PASSED ✓
+- 2 edge case failures (extra relationships, not missing ones)
+
+### Recommendation
+
+**Upgrade immediately if you've seen false positive relationships** involving timestamp fields, content fields, or measurement fields in your semantic models.
+
 ## [1.0.46] - 2025-10-21
 
 ### Critical Bug Fix - Missed Relationships in Tie Scenarios
