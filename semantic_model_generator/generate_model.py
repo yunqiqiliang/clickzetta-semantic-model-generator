@@ -220,6 +220,49 @@ def _safe_semantic_identifier(
         suffix += 1
 
 
+def _could_be_identifier_column(column_name: str, base_type: str) -> bool:
+    """
+    Check if a column could potentially be a primary key based on naming and type.
+    More strict than _is_identifier_like - used for sample data PK inference.
+
+    Returns True only if:
+    1. Column name contains key-like tokens (id, key, num, code, no)
+    2. Base type is appropriate for keys (not DECIMAL, DATE, TEXT/COMMENT types)
+    """
+    # Type must be appropriate for a key (integer or short string, not decimal/date/text)
+    if base_type not in {"NUMBER", "STRING", "BIGINT", "INTEGER", "INT", "VARCHAR"}:
+        return False
+
+    # Column name must contain key-like tokens
+    col_upper = column_name.upper()
+    tokens = _identifier_tokens(column_name)
+
+    # Check for explicit key indicators
+    key_indicators = {"ID", "KEY", "NUM", "NO", "CODE", "PK", "ROWID", "PRIMARY"}
+    for token in tokens:
+        if token in key_indicators:
+            return True
+        # Also check suffixes
+        if token.endswith("ID") and len(token) > 2:
+            return True
+        if token.endswith("KEY") and len(token) > 3:
+            return True
+        if token.endswith("NUM") or token.endswith("NO"):
+            return True
+
+    # Exclude obvious non-key columns
+    exclude_indicators = {"NAME", "COMMENT", "DESC", "DESCRIPTION", "ADDRESS",
+                         "PHONE", "EMAIL", "BALANCE", "AMOUNT", "PRICE", "COST",
+                         "DATE", "TIME", "TIMESTAMP", "QTY", "QUANTITY"}
+    for token in tokens:
+        if token in exclude_indicators:
+            return False
+        if any(token.endswith(suffix) for suffix in ["BAL", "AMT", "AVAIL"]):
+            return False
+
+    return False
+
+
 def _is_identifier_like(column_name: str, base_type: str) -> bool:
     """
     Heuristic to detect identifier-style numeric columns that should stay as dimensions.
@@ -3483,10 +3526,12 @@ def _infer_relationships(
 
             # ENHANCEMENT: Infer PK from sample data when column naming is poor
             # This allows PK detection for columns like 'uid', 'oid', 'pid' etc.
+            # IMPORTANT: Only apply when column name suggests it could be a key (contains id/key/num)
             if (
                 not has_explicit_pk
                 and column.column_name not in pk_candidates[normalized]
                 and column.values
+                and _could_be_identifier_column(column.column_name, base_type)
             ):
                 # Check if sample data shows high uniqueness (PK pattern)
                 if _infer_pk_from_sample_data(column.values, min_uniqueness=0.95, min_sample_size=20):
