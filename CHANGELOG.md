@@ -2,6 +2,16 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.19] - 2025-10-21
+
+### Fixes
+
+- Expanded foreign-key heuristics to cover custom table prefixes and avoid suffix-only matches; added regression tests for id/id and order invariance scenarios.
+
+### Testing
+
+- `POETRY_CACHE_DIR=.poetry-cache poetry run pytest -q`
+
 ## [1.0.18] - 2025-10-21
 
 ### Fixes
