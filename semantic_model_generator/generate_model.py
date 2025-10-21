@@ -321,6 +321,97 @@ def _is_identifier_like(column_name: str, base_type: str) -> bool:
     return False
 
 
+def _should_exclude_from_relationship_matching(column_name: str, base_type: str = None) -> bool:
+    """
+    Check if a column should be excluded from FK-PK relationship matching.
+
+    Excludes columns that are clearly not suitable for relationships:
+    - Timestamp fields (created_at, updated_at, deleted_at, etc.)
+    - Content/text fields (description, content, comment, notes, etc.)
+    - Measurement fields (amount, price, quantity without ID suffix)
+
+    This prevents false positive matches like:
+    - comments.created_at = posts.created_at
+    - comments.content = posts.content
+
+    Returns True if column should be EXCLUDED (not used for matching)
+    """
+    if not column_name:
+        return True
+
+    col_upper = column_name.upper()
+    tokens = _identifier_tokens(column_name)
+
+    # Exclude timestamp/date columns
+    timestamp_patterns = {
+        "CREATED_AT", "UPDATED_AT", "DELETED_AT", "MODIFIED_AT",
+        "CREATED_TIME", "UPDATED_TIME", "DELETED_TIME", "MODIFIED_TIME",
+        "CREATE_TIME", "UPDATE_TIME", "DELETE_TIME", "MODIFY_TIME",
+        "CREATEDAT", "UPDATEDAT", "DELETEDAT", "MODIFIEDAT",
+        "CREATED_DATE", "UPDATED_DATE", "DELETED_DATE", "MODIFIED_DATE",
+        "CREATE_DATE", "UPDATE_DATE", "DELETE_DATE", "MODIFY_DATE",
+        "TIMESTAMP", "DATETIME", "DATE_TIME"
+    }
+
+    if col_upper in timestamp_patterns:
+        return True
+
+    # Check for *_AT, *_DATE, *_TIME patterns
+    # But be careful: date_key, date_id are OK (they're identifiers, not timestamps)
+    for token in tokens:
+        if token.endswith("_AT") or token.endswith("AT"):
+            # Check if it looks like a timestamp (not like STATUS_AT which might be valid)
+            prev_tokens = [t for t in tokens if t != token]
+            if prev_tokens and prev_tokens[-1] in {"CREATED", "UPDATED", "DELETED", "MODIFIED", "CREATE", "UPDATE", "DELETE", "MODIFY"}:
+                return True
+        # Exclude *_DATE and *_TIME UNLESS it's followed by KEY/ID (like date_key, time_id)
+        if token.endswith("_DATE") or token.endswith("_TIME"):
+            # Check if next token is KEY or ID
+            token_idx = tokens.index(token)
+            if token_idx < len(tokens) - 1:
+                next_token = tokens[token_idx + 1]
+                if next_token in {"KEY", "ID"} or next_token.endswith("KEY") or next_token.endswith("ID"):
+                    continue  # date_key, time_id are OK
+            return True
+        # Exclude bare DATE, TIME, TIMESTAMP columns UNLESS they have KEY/ID suffix
+        if token in {"DATE", "TIME", "TIMESTAMP", "DATETIME"}:
+            # Check if there's a KEY or ID token
+            has_key_id = any(t in {"KEY", "ID"} or t.endswith("KEY") or t.endswith("ID") for t in tokens)
+            if not has_key_id:
+                return True
+
+    # Exclude content/text fields
+    content_patterns = {
+        "DESCRIPTION", "CONTENT", "COMMENT", "COMMENTS", "NOTE", "NOTES",
+        "TEXT", "BODY", "MESSAGE", "SUMMARY", "ABSTRACT",
+        "DESC", "DETAILS", "REMARKS", "MEMO"
+    }
+
+    if col_upper in content_patterns:
+        return True
+
+    for token in tokens:
+        if token in content_patterns:
+            # But allow if it's part of an ID pattern (rare but possible)
+            if not (token.endswith("_ID") or token.endswith("_KEY")):
+                return True
+
+    # Exclude measurement fields without ID/KEY suffix
+    # (amount_id or price_id would be OK, but amount or price alone are not keys)
+    measurement_patterns = {"AMOUNT", "PRICE", "COST", "TOTAL", "SUBTOTAL",
+                           "QUANTITY", "QTY", "COUNT", "SUM", "BALANCE"}
+
+    for token in tokens:
+        if token in measurement_patterns:
+            # Check if it has ID/KEY suffix
+            has_id_suffix = any(t in {"ID", "KEY"} or t.endswith("ID") or t.endswith("KEY")
+                               for t in tokens)
+            if not has_id_suffix:
+                return True
+
+    return False
+
+
 def _table_variants(table_name: str) -> set[str]:
     table_upper = table_name.upper()
     tokens = _identifier_tokens(table_name)
@@ -831,6 +922,11 @@ def _generate_optimized_relationship_candidates(metadata, _record_pair, status_d
             if status_dict["limited_by_timeout"]:
                 break
 
+            # CRITICAL: Exclude columns that should never be used for relationships
+            # This prevents false positives like created_at, content, description matches
+            if _should_exclude_from_relationship_matching(fk_meta["names"][0], fk_meta["base_type"]):
+                continue
+
             # Skip primary key columns (except for composite keys)
             if fk_norm in fk_table_meta["pk_candidates"]:
                 pk_count = len(fk_table_meta["pk_candidates"])
@@ -850,6 +946,10 @@ def _generate_optimized_relationship_candidates(metadata, _record_pair, status_d
             for (pk_table_name, pk_norm), pk_info in pk_lookup.items():
                 # Skip same table
                 if pk_table_name == fk_table_name:
+                    continue
+
+                # CRITICAL: Also exclude PK columns that shouldn't be used for relationships
+                if _should_exclude_from_relationship_matching(pk_info["meta"]["names"][0], pk_info["meta"]["base_type"]):
                     continue
 
                 # Type compatibility check
