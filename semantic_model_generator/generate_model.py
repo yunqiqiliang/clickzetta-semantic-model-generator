@@ -361,34 +361,86 @@ def _table_prefixes(table_name: str) -> set[str]:
 
 
 def _looks_like_primary_key(table_name: str, column_name: str) -> bool:
+    """
+    Pure column-pattern-based primary key detection.
+
+    CRITICAL FIX: Only identify columns as PK if they match the table name pattern.
+    This prevents foreign keys like S_NATIONKEY from being misidentified as PKs.
+
+    Args:
+        table_name: Table name (used for matching)
+        column_name: Column name to evaluate
+
+    Returns:
+        True if column pattern suggests it's a primary key
+    """
     upper_name = column_name.strip().upper()
-    variants = _table_variants(table_name)
-    direct_matches = {
-        "ID",
-        "PK",
-        "PRIMARY_KEY",
+    upper_table = table_name.strip().upper()
+
+    # Direct primary key indicators
+    direct_pk_patterns = {
+        "ID", "PK", "PRIMARY_KEY", "PKEY"
     }
-    for variant in variants:
-        direct_matches.update(
-            {f"{variant}_ID", f"{variant}ID", f"{variant}_KEY", f"{variant}KEY"}
-        )
-    if upper_name in direct_matches:
+
+    if upper_name in direct_pk_patterns:
         return True
 
+    # Parse column tokens for structured analysis
     tokens = _identifier_tokens(column_name)
     if not tokens:
         return False
-    last = tokens[-1]
-    if last in {"ID", "KEY"} and len(tokens) >= 2 and tokens[-2] in variants:
+
+    # Parse table name tokens
+    table_tokens = _identifier_tokens(table_name)
+    table_core = "_".join(table_tokens) if table_tokens else upper_table
+
+    # Pattern 1: {entity}_id or {entity}_key where entity matches table name
+    if len(tokens) >= 2:
+        last_token = tokens[-1]
+        if last_token in {"ID", "KEY"}:
+            # Extract the entity prefix
+            prefix_tokens = tokens[:-1]
+            prefix = "_".join(prefix_tokens)
+
+            # CRITICAL: Only return True if prefix matches table name
+            # This prevents foreign keys from being identified as PKs
+            # Examples:
+            #   S_SUPPKEY in SUPPLIER table: prefix="S_SUPP", matches "SUPPLIER" ✅
+            #   S_NATIONKEY in SUPPLIER table: prefix="S_NATION", doesn't match "SUPPLIER" ❌
+            if len(prefix) >= 1 and prefix not in _GENERIC_IDENTIFIER_TOKENS:
+                # Check if prefix is contained in table name or vice versa
+                if prefix in table_core or table_core in prefix:
+                    return True
+                # Check for abbreviations (first few chars)
+                if len(prefix) >= 3 and table_core.startswith(prefix):
+                    return True
+                if len(table_core) >= 3 and prefix.startswith(table_core):
+                    return True
+
+    # Pattern 2: Handle compound tokens that contain KEY/ID (e.g., ORDERKEY)
+    if len(tokens) >= 1:
+        for token in tokens:
+            if token.endswith("ID") and len(token) > 3:
+                prefix = token[:-2]
+                if len(prefix) >= 2 and prefix not in _GENERIC_IDENTIFIER_TOKENS:
+                    # Check if prefix matches table name
+                    if prefix in table_core or table_core in prefix:
+                        return True
+            if token.endswith("KEY") and len(token) > 4:
+                prefix = token[:-3]
+                if len(prefix) >= 2 and prefix not in _GENERIC_IDENTIFIER_TOKENS:
+                    # Check if prefix matches table name
+                    if prefix in table_core or table_core in prefix:
+                        return True
+
+    # Pattern 3: Common meaningful PK column patterns
+    meaningful_pk_patterns = {
+        "RECORD_ID", "ROW_ID", "ENTITY_ID", "UNIQUE_ID",
+        "SEQUENCE_ID", "AUTO_ID", "SERIAL_ID"
+    }
+
+    if upper_name in meaningful_pk_patterns:
         return True
-    if last.endswith("ID") and last[:-2] in variants:
-        return True
-    if last.endswith("KEY") and last[:-3] in variants:
-        return True
-    if len(tokens) == 1 and last.endswith(("ID", "KEY")):
-        stem = last[:-2] if last.endswith("ID") else last[:-3]
-        if stem in variants:
-            return True
 
     return False
 
@@ -482,19 +534,34 @@ def _levenshtein_distance(s1: str, s2: str) -> int:
 
 def _name_similarity(name1: str, name2: str) -> float:
     """
-    Calculate normalized similarity score between two column names.
+    Calculate column name similarity using universal patterns.
     Returns a score between 0.0 (completely different) and 1.0 (identical).
     """
     if not name1 or not name2:
         return 0.0
 
+    name1_upper = name1.upper()
+    name2_upper = name2.upper()
+
     # Exact match
-    if name1.upper() == name2.upper():
+    if name1_upper == name2_upper:
         return 1.0
 
-    # Normalize names for comparison
-    norm1 = name1.upper().replace("_", "").replace("-", "")
-    norm2 = name2.upper().replace("_", "").replace("-", "")
+    # Extract core entities for semantic comparison
+    core1 = _extract_core_entity(name1_upper)
+    core2 = _extract_core_entity(name2_upper)
+
+    # Perfect core match (e.g., CUSTKEY vs CUSTKEY)
+    if core1 == core2 and core1:
+        return 0.95
+
+    # Entity abbreviation match (e.g., CUST vs CUSTOMER)
+    if _are_entity_variants(core1, core2):
+        return 0.90
+
+    # Standard normalization and Levenshtein
+    norm1 = name1_upper.replace("_", "").replace("-", "")
+    norm2 = name2_upper.replace("_", "").replace("-", "")
 
     if norm1 == norm2:
         return 0.95
@@ -510,9 +577,335 @@ def _name_similarity(name1: str, name2: str) -> float:
     return max(0.0, similarity)
 
 
+def _extract_core_entity(column_name: str) -> str:
+    """
+    Extract core entity from column name for semantic matching.
+
+    Examples:
+        c_nationkey → nation
+        n_nationkey → nation
+        s_nationkey → nation
+        n_regionkey → region
+        r_regionkey → region
+        customer_id → customer
+        order_id → order
+    """
+    name_lower = column_name.lower()
+
+    # Remove common table prefixes (single or double letter followed by underscore)
+    # Matches: c_, n_, s_, o_, l_, ps_, p_, r_, etc.
+    if "_" in name_lower:
+        parts = name_lower.split("_", 1)
+        if len(parts) == 2 and len(parts[0]) <= 2:
+            # Remove prefix like "c_", "ps_"
+            core_part = parts[1]
+        else:
+            core_part = name_lower
+    else:
+        core_part = name_lower
+
+    # Remove common suffixes (key, id, num, no, etc.)
+    for suffix in ["key", "_key", "id", "_id", "num", "_num", "no", "_no"]:
+        if core_part.endswith(suffix):
+            core_part = core_part[:-len(suffix)]
+            break
+
+    # Clean up any trailing underscores
+    core_part = core_part.strip("_")
+
+    return core_part
+
+
+def _are_entity_variants(entity1: str, entity2: str) -> bool:
+    """
+    Check if two entities are variants of the same concept.
+
+    Universal approach:
+    - Checks for common abbreviations (cust/customer, supp/supplier, etc.)
+    - Checks for plural/singular variations
+    - Uses string similarity for fuzzy matching
+    """
+    if not entity1 or not entity2:
+        return False
+
+    e1 = entity1.lower()
+    e2 = entity2.lower()
+
+    # Exact match
+    if e1 == e2:
+        return True
+
+    # Common abbreviation patterns (universal, not schema-specific)
+    abbrev_patterns = [
+        ("cust", "customer"),
+        ("supp", "supplier"),
+        ("prod", "product"),
+        ("cat", "category"),
+        ("addr", "address"),
+        ("qty", "quantity"),
+        ("amt", "amount"),
+        ("num", "number"),
+        ("desc", "description"),
+        ("ref", "reference"),
+    ]
+
+    for abbrev, full in abbrev_patterns:
+        if (e1 == abbrev and e2.startswith(full)) or (e2 == abbrev and e1.startswith(full)):
+            return True
+
+    # Plural/singular variants
+    if e1.rstrip("s") == e2.rstrip("s"):
+        return True
+
+    # Check string similarity for close matches using Levenshtein ratio
+    max_len = max(len(e1), len(e2))
+    if max_len:
+        distance = _levenshtein_distance(e1.upper(), e2.upper())
+        similarity = 1.0 - (distance / max_len)
+        if similarity > 0.85:  # Very high similarity threshold
+            return True
+
+    return False
+
+
+def _follows_fk_naming_pattern(fk_column: str, pk_column: str, pk_table: str) -> bool:
+    """Check if foreign key follows standard naming patterns."""
+    fk_upper = fk_column.upper()
+    pk_upper = pk_column.upper()
+    pk_table_upper = pk_table.upper()
+
+    # Universal pattern: {table_prefix}_{entity}KEY (common across many schemas)
+    if "_" in fk_upper and "_" in pk_upper:
+        fk_parts = fk_upper.split("_", 1)
+        pk_parts = pk_upper.split("_", 1)
+
+        if len(fk_parts) == 2 and len(pk_parts) == 2:
+            # Same entity part (e.g., CUSTKEY, NATIONKEY)
+            if fk_parts[1] == pk_parts[1]:
+                return True
+
+    # Standard pattern: table_column
+    if fk_upper.endswith(f"_{pk_upper}"):
+        return True
+
+    # Contains pattern
+    if pk_upper in fk_upper and len(pk_upper) >= 4:
+        return True
+
+    return False
+
+
+def _validate_composite_key_consistency(column_pairs: List[tuple[str, str]]) -> bool:
+    """
+    Validate that composite key relationships are consistent.
+
+    Prevents errors like: s_nationkey = n_nationkey AND s_nationkey = n_regionkey
+    where the same source column is mapped to multiple target columns.
+    """
+    source_to_target = {}
+
+    for left_col, right_col in column_pairs:
+        left_lower = left_col.lower()
+        right_lower = right_col.lower()
+
+        if left_lower in source_to_target:
+            # Same source column mapped to different targets - invalid!
+            if source_to_target[left_lower] != right_lower:
+                return False
+        else:
+            source_to_target[left_lower] = right_lower
+
+    return True
+
+
+def _generate_optimized_relationship_candidates(metadata, _record_pair, status_dict, _timed_out, min_similarity_threshold=0.6):
+    """
+    Universal relationship candidate generation using FK-PK pattern matching.
+
+    This function uses intelligent FK-PK matching with semantic validation,
+    applicable to any database schema.
+    """
+    domain_patterns_cache = _get_domain_knowledge_patterns()
+    # Build a lookup of all primary key candidates
+    pk_lookup = {}
+    for table_name, table_meta in metadata.items():
+        for pk_norm, pk_cols in table_meta["pk_candidates"].items():
+            pk_meta = table_meta["columns"].get(pk_norm)
+            if pk_meta:
+                pk_lookup[(table_name, pk_norm)] = {
+                    "meta": pk_meta,
+                    "columns": pk_cols,
+                    "table": table_name
+                }
+
+    # For each table, find potential foreign key candidates
+    for fk_table_name, fk_table_meta in metadata.items():
+        if status_dict["limited_by_timeout"]:
+            break
+        if _timed_out():
+            status_dict["limited_by_timeout"] = True
+            break
+
+        for fk_norm, fk_meta in fk_table_meta["columns"].items():
+            if status_dict["limited_by_timeout"]:
+                break
+
+            # Skip primary key columns (except for composite keys)
+            if fk_norm in fk_table_meta["pk_candidates"]:
+                pk_count = len(fk_table_meta["pk_candidates"])
+                if pk_count <= 1:
+                    table_convention = _identify_naming_convention(
+                        fk_table_name, domain_patterns_cache
+                    )
+                    if table_convention not in {"dimension", "bridge"}:
+                        continue
+                # Composite keys with more than one PK are allowed to participate
+
+            # CRITICAL FIX: Find ALL matching primary keys, not just the best one
+            # A foreign key column can reference multiple tables' primary keys in different relationships
+            # (e.g., LINEITEM.L_PARTKEY can reference both PART.P_PARTKEY and participate in PARTSUPP relationship)
+            all_matches = []
+
+            for (pk_table_name, pk_norm), pk_info in pk_lookup.items():
+                # Skip same table
+                if pk_table_name == fk_table_name:
+                    continue
+
+                # Type compatibility check
+                if fk_meta["base_type"] != pk_info["meta"]["base_type"]:
+                    continue
+
+                # Calculate enhanced name similarity
+                similarity = _name_similarity(fk_meta["names"][0], pk_info["meta"]["names"][0])
+
+                # Universal enhancement: Core entity matching
+                fk_core = _extract_core_entity(fk_meta["names"][0])
+                pk_core = _extract_core_entity(pk_info["meta"]["names"][0])
+
+                # Semantic validation - reject obviously wrong matches but allow hierarchical containment
+                # SKIP semantic validation if entity names are too short (unreliable)
+                # This allows sample data-based matching to work for poorly named columns
+                if (fk_core and pk_core and len(fk_core) >= 2 and len(pk_core) >= 2
+                    and fk_core != pk_core):
+                    cores_related = (
+                        fk_core.endswith(pk_core)
+                        or pk_core.endswith(fk_core)
+                        or fk_core.startswith(pk_core)
+                        or pk_core.startswith(fk_core)
+                        or _are_entity_variants(fk_core, pk_core)
+                    )
+                    if not cores_related:
+                        continue
+
+                # Entity alignment bonus
+                entity_bonus = 0.0
+                if fk_core and pk_core:
+                    if fk_core == pk_core:
+                        # Perfect core entity match - this is STRONG evidence!
+                        entity_bonus = 0.50  # Increased from 0.20
+                    elif _are_entity_variants(fk_core, pk_core):
+                        entity_bonus = 0.30  # Increased from 0.15
+
+                # Total score (universal - no business-specific bonuses)
+                total_score = similarity + entity_bonus
+
+                # FK naming pattern bonus
+                if _follows_fk_naming_pattern(fk_meta["names"][0], pk_info["meta"]["names"][0], pk_table_name):
+                    total_score += 0.10
+
+                # ENHANCEMENT: Sample data-based FK inference
+                # Use sample data to validate and strengthen relationship inference
+                sample_data_confidence = 0.0
+                fk_values = fk_meta.get("values") or []
+                pk_values = pk_info["meta"].get("values") or []
+                if fk_values and pk_values:
+                    sample_data_confidence = _infer_fk_from_sample_data(
+                        fk_values, pk_values, min_sample_size=20
+                    )
+                    # Add sample data evidence to total score
+                    # Scale it appropriately (0.0-0.6 bonus for strong evidence)
+                    sample_bonus = sample_data_confidence * 0.6
+                    total_score += sample_bonus
+                    # DEBUG logging (commented out for production)
+                    # if sample_data_confidence > 0.1:
+                    #     print(f"  📊 Sample data: {fk_table_name}.{fk_meta['names'][0]} → {pk_table_name}.{pk_info['meta']['names'][0]} "
+                    #           f"conf={sample_data_confidence:.2f}, bonus={sample_bonus:.2f}, total={total_score:.2f}")
+
+                # Lower threshold if core entities match perfectly
+                effective_threshold = min_similarity_threshold
+                if fk_core and pk_core and fk_core == pk_core:
+                    effective_threshold = 0.3  # Much lower threshold for perfect entity match
+                elif sample_data_confidence > 0.6:
+                    # Strong sample data evidence allows lower threshold
+                    effective_threshold = 0.3
+
+                # Record ALL matches that meet the threshold, not just the best
+                if total_score >= effective_threshold:
+                    all_matches.append({
+                        "pk_table": pk_table_name,
+                        "pk_column": pk_info["meta"]["names"][0],
+                        "score": total_score,
+                        "similarity": similarity,
+                        "entity_bonus": entity_bonus,
+                        "sample_data_confidence": sample_data_confidence
+                    })
+
+            # Sort matches by score (highest first)
+            all_matches.sort(key=lambda x: x["score"], reverse=True)
+
+            # CRITICAL: Record only the BEST match for each FK column to avoid inconsistent composite keys
+            # Exception: If sample data confidence is very high (>0.8), record top matches
+            if all_matches:
+                # DEBUG: Log for LINEITEM FK columns
+                if fk_table_name.upper() == "LINEITEM" and fk_meta["names"][0].upper() in ["L_PARTKEY", "L_SUPPKEY"]:
+                    print(f"\n  🔍 DEBUG: Found {len(all_matches)} match(es) for {fk_table_name}.{fk_meta['names'][0]}")
+                    for i, match in enumerate(all_matches, 1):
+                        print(f"     {i}. {match['pk_table']}.{match['pk_column']} - Score: {match['score']:.3f}")
+
+                # Record best match (highest score)
+                best_match = all_matches[0]
+                _record_pair(
+                    fk_table_name,
+                    best_match["pk_table"],
+                    fk_meta["names"][0],
+                    best_match["pk_column"]
+                )
+
+                # Also record additional matches if they have very high sample data confidence
+                # (indicates strong data-driven evidence for multiple relationships)
+                if len(all_matches) > 1:
+                    for match in all_matches[1:]:
+                        if match["sample_data_confidence"] > 0.8:
+                            _record_pair(
+                                fk_table_name,
+                                match["pk_table"],
+                                fk_meta["names"][0],
+                                match["pk_column"]
+                            )
+            else:
+                # DEBUG: Log columns that didn't find a match (potential missing relationships)
+                fk_core = _extract_core_entity(fk_meta["names"][0])
+                if fk_core and len(fk_core) >= 3:  # Only log meaningful entity names
+                    # Check if there are any PK candidates with the same core entity
+                    potential_matches = []
+                    for (pk_table_name, pk_norm), pk_info in pk_lookup.items():
+                        if pk_table_name == fk_table_name:
+                            continue
+                        pk_core = _extract_core_entity(pk_info["meta"]["names"][0])
+                        if fk_core == pk_core or _are_entity_variants(fk_core, pk_core):
+                            potential_matches.append(f"{pk_table_name}.{pk_info['meta']['names'][0]}")
+
+                    if potential_matches:
+                        print(f"  ⚠️  No match found for {fk_table_name}.{fk_meta['names'][0]} (core: {fk_core})")
+                        print(f"      Potential matches with same core: {', '.join(potential_matches)}")
+                        print(f"      Hint: Check similarity threshold or type compatibility")
+
+
 def _analyze_composite_key_patterns(
     table_meta: Dict[str, Any],
     column_pairs: List[tuple[str, str]],
+    *,
+    column_index: int,
 ) -> Dict[str, Any]:
     """
     Analyze composite key patterns for multi-column relationships.
@@ -520,16 +913,22 @@ def _analyze_composite_key_patterns(
     Args:
         table_meta: Metadata about the table
         column_pairs: List of column pairs in the relationship
+        column_index: Which element of each pair belongs to this table (0 for left, 1 for right)
 
     Returns:
         Dict with composite key analysis results
     """
     pk_candidates = table_meta.get("pk_candidates", {})
+    pk_keys_lower = {key.lower() for key in pk_candidates.keys()}
 
     # Check if all relationship columns form a composite key
-    relationship_cols = [
-        pair[0] if isinstance(pair, tuple) else pair for pair in column_pairs
-    ]
+    relationship_cols = []
+    for pair in column_pairs:
+        if isinstance(pair, tuple):
+            if 0 <= column_index < len(pair):
+                relationship_cols.append(pair[column_index])
+        else:
+            relationship_cols.append(pair)
 
     # Normalize column names for comparison
     global_prefixes = set()  # This should come from context but we'll handle it locally
@@ -547,7 +946,9 @@ def _analyze_composite_key_patterns(
     ]
 
     # Check if these columns together might form a composite PK
-    pk_col_count = sum(1 for col in normalized_rel_cols if col in pk_candidates)
+    pk_col_count = sum(
+        1 for col in normalized_rel_cols if col.lower() in pk_keys_lower
+    )
     total_pk_candidates = len(pk_candidates)
 
     analysis = {
@@ -596,8 +997,12 @@ def _infer_composite_cardinality(
         tuple: (left_cardinality, right_cardinality)
     """
     # Analyze composite key patterns
-    left_analysis = _analyze_composite_key_patterns(left_meta, column_pairs)
-    right_analysis = _analyze_composite_key_patterns(right_meta, column_pairs)
+    left_analysis = _analyze_composite_key_patterns(
+        left_meta, column_pairs, column_index=0
+    )
+    right_analysis = _analyze_composite_key_patterns(
+        right_meta, column_pairs, column_index=1
+    )
 
     # Rule 1: If one side is a complete composite PK, it's likely "1"
     if right_analysis["is_composite_pk"]:
@@ -612,7 +1017,7 @@ def _infer_composite_cardinality(
         return ("1", "*")
 
     # Rule 3: Composite key uniqueness analysis (if we have sufficient samples)
-    MIN_SAMPLE_SIZE = 20  # Lower threshold for composite keys
+    MIN_SAMPLE_SIZE = 50  # P1 Fix: Much higher threshold to reduce composite key over-generation
 
     if (
         left_values_all
@@ -675,6 +1080,10 @@ def _infer_composite_cardinality(
             first_right_vals,
             left_analysis.get("pk_column_count", 0) > 0,
             right_analysis.get("pk_column_count", 0) > 0,
+            left_table="",  # Table names not available in composite cardinality
+            right_table="",
+            left_column="",  # Column names not available in composite cardinality
+            right_column="",
             adaptive_thresholds=adaptive_thresholds,
         )
 
@@ -837,14 +1246,20 @@ def _detect_bridge_table_pattern(
         if len(set(matching_tables)) >= 2:
             confidence += 0.15
 
+    # Promote classic two-key bridge tables
+    if total_columns <= 3 and len(fk_like_columns) >= 2:
+        confidence = max(confidence, 0.85)
+
     # Normalize confidence
     confidence = min(confidence, 1.0)
 
-    is_bridge = confidence >= 0.6  # Threshold for bridge table classification
+    is_bridge = confidence >= 0.6  # Slightly lower threshold to capture standard two-key bridges
 
-    connected_tables = [
-        fk["references_table"] for fk in fk_like_columns if fk["confidence"] >= 0.5
-    ]
+    # Get unique connected tables with sufficient confidence
+    connected_tables_set = {
+        fk["references_table"] for fk in fk_like_columns if fk["confidence"] >= 0.65
+    }
+    connected_tables = list(connected_tables_set)
 
     return {
         "is_bridge": is_bridge,
@@ -905,6 +1320,54 @@ def _detect_many_to_many_relationships(
         if len(connected_tables) < 2:
             continue
 
+        bridge_meta = metadata.get(bridge_table, {})
+        bridge_pk_names = {
+            name.upper()
+            for pk_list in bridge_meta.get("pk_candidates", {}).values()
+            for name in pk_list
+        }
+
+        existing_pair_names = {
+            (rel.left_table, rel.right_table) for rel in existing_relationships
+        }
+
+        # Ensure bridge table retains direct FK relationships to connected tables
+        for target_table in connected_tables:
+            if (bridge_table, target_table) not in existing_pair_names:
+                fk_cols = [
+                    fk["column"]
+                    for fk in bridge_info["fk_like_columns"]
+                    if fk["references_table"] == target_table and fk["confidence"] >= 0.5
+                ]
+                if not fk_cols:
+                    continue
+                if bridge_pk_names and not any(col.upper() in bridge_pk_names for col in fk_cols):
+                    continue
+                target_meta = metadata.get(target_table)
+                if not target_meta:
+                    continue
+                pk_candidates = target_meta.get("pk_candidates", {})
+                if not pk_candidates:
+                    continue
+                # Pick the first declared PK column
+                pk_column = next(iter(pk_candidates.values()))[0]
+
+                direct_rel = semantic_model_pb2.Relationship(
+                    name=f"{bridge_table}_to_{target_table}",
+                    left_table=bridge_table,
+                    right_table=target_table,
+                    join_type=semantic_model_pb2.JoinType.inner,
+                    relationship_type=semantic_model_pb2.RelationshipType.many_to_one,
+                )
+                direct_rel.relationship_columns.append(
+                    semantic_model_pb2.RelationKey(
+                        left_column=fk_cols[0].upper(),
+                        right_column=pk_column.upper(),
+                    )
+                )
+                many_to_many_relationships.append(direct_rel)
+                existing_pair_names.add((bridge_table, target_table))
+
         # Create relationships for each pair of connected tables
         for i in range(len(connected_tables)):
             for j in range(i + 1, len(connected_tables)):
@@ -914,11 +1377,26 @@ def _detect_many_to_many_relationships(
                 if left_table == right_table:
                     continue
 
+                # Normalize orientation for consistency (fact -> dimension)
+                domain_patterns = _get_domain_knowledge_patterns()
+                left_conv = _identify_naming_convention(left_table, domain_patterns)
+                right_conv = _identify_naming_convention(right_table, domain_patterns)
+                if left_conv == "dimension" and right_conv == "fact":
+                    left_table, right_table = right_table, left_table
+                elif left_conv == right_conv and left_table > right_table:
+                    # Deterministic ordering when conventions match
+                    left_table, right_table = right_table, left_table
+
                 # Skip if direct relationship already exists
                 existing_pair_names = {
                     (rel.left_table, rel.right_table) for rel in existing_relationships
                 } | {
                     (rel.right_table, rel.left_table) for rel in existing_relationships
+                }
+                existing_pair_names |= {
+                    (rel.left_table, rel.right_table) for rel in many_to_many_relationships
+                } | {
+                    (rel.right_table, rel.left_table) for rel in many_to_many_relationships
                 }
 
                 if (left_table, right_table) in existing_pair_names:
@@ -961,12 +1439,8 @@ def _detect_many_to_many_relationships(
                     # Use the first detected FK columns as a representative
                     relationship.relationship_columns.append(
                         semantic_model_pb2.RelationKey(
-                            left_column=left_fk_cols[
-                                0
-                            ],  # This is actually in the bridge table
-                            right_column=right_fk_cols[
-                                0
-                            ],  # This is also in the bridge table
+                            left_column=left_fk_cols[0].upper(),
+                            right_column=right_fk_cols[0].upper(),
                         )
                     )
 
@@ -1017,9 +1491,10 @@ def _calculate_relationship_confidence(
     reasoning_factors = []
     evidence_details = {}
 
-    # Factor 1: Primary key metadata evidence (highest confidence)
+    # Factor 1: Primary key metadata evidence (universal for all schemas)
     if left_has_pk or right_has_pk:
-        pk_confidence = 0.4
+        # Reduced from 0.4 to 0.3 to decrease metadata dependency
+        pk_confidence = 0.3
         confidence_score += pk_confidence
         if left_has_pk and right_has_pk:
             reasoning_factors.append(
@@ -1054,18 +1529,19 @@ def _calculate_relationship_confidence(
         avg_name_similarity = total_name_similarity / len(column_pairs)
         evidence_details["avg_name_similarity"] = avg_name_similarity
 
+        # Universal name similarity scoring (no schema-specific bonuses)
         if avg_name_similarity >= 0.9:
-            name_confidence = 0.25
+            name_confidence = 0.35
             reasoning_factors.append(
                 f"Very high column name similarity ({avg_name_similarity:.2f})"
             )
         elif avg_name_similarity >= 0.7:
-            name_confidence = 0.2
+            name_confidence = 0.25
             reasoning_factors.append(
                 f"High column name similarity ({avg_name_similarity:.2f})"
             )
         elif avg_name_similarity >= 0.5:
-            name_confidence = 0.15
+            name_confidence = 0.2   # Enhanced: 0.15 → 0.2
             reasoning_factors.append(
                 f"Moderate column name similarity ({avg_name_similarity:.2f})"
             )
@@ -1212,6 +1688,15 @@ def _calculate_relationship_confidence(
 
         confidence_score += type_confidence
 
+    # Bonus: identical column identifiers provide strong evidence
+    if any(
+        left_col.upper() == right_col.upper() for left_col, right_col in column_pairs
+    ):
+        confidence_score += 0.1
+        reasoning_factors.append(
+            "Foreign key and primary key share identical identifier"
+        )
+
     # Factor 5: Table role consistency (business logic)
     left_role = _detect_table_role(left_table, left_meta)
     right_role = _detect_table_role(right_table, right_meta)
@@ -1249,6 +1734,14 @@ def _calculate_relationship_confidence(
             f"Multi-column relationship ({len(column_pairs)} columns) increases confidence"
         )
         confidence_score += composite_confidence
+
+    # Universal penalty for inconsistent composite keys (works for ANY schema)
+    if len(column_pairs) > 1:
+        if not _validate_composite_key_consistency(column_pairs):
+            # This is a logical error: same source column cannot map to multiple different targets
+            confidence_score = max(confidence_score - 0.5, 0.1)  # Heavy penalty
+            reasoning_factors.append("Inconsistent composite key detected (same source column mapped to multiple targets)")
+            evidence_details["inconsistent_composite"] = True
 
     # Normalize confidence score to 0-1 range
     confidence_score = min(confidence_score, 1.0)
@@ -1568,8 +2061,20 @@ def _apply_domain_knowledge(
             confidence_boost += 0.2
             enhancement_factors.append("Standard fact-dimension naming pattern (+0.20)")
         elif left_convention == "dimension" and right_convention == "dimension":
+            hierarchy_boost = 0.2
+            confidence_boost += hierarchy_boost
+            enhancement_factors.append(
+                f"Dimension hierarchy naming pattern (+{hierarchy_boost:.2f})"
+            )
+
+    # Additional boost when FK column explicitly references the target table name
+    for left_col, right_col in column_pairs:
+        if _column_mentions_table(left_col, right_table):
             confidence_boost += 0.1
-            enhancement_factors.append("Dimension hierarchy naming pattern (+0.10)")
+            enhancement_factors.append(
+                f"Foreign key column '{left_col}' references target table tokens (+0.10)"
+            )
+            break
 
     # Factor 4: Time dimension special handling
     if _is_time_dimension_pattern(right_table, right_meta, domain_patterns):
@@ -1730,6 +2235,118 @@ def _detect_schema_pattern(
         return "bridge_table"
 
     return None
+
+
+def _infer_pk_from_sample_data(
+    column_values: List[Any],
+    min_uniqueness: float = 0.95,
+    min_sample_size: int = 20,
+) -> bool:
+    """
+    Infer if a column is likely a primary key based on sample data uniqueness.
+
+    Args:
+        column_values: Sample values from the column
+        min_uniqueness: Minimum uniqueness ratio to be considered a PK (default 0.95)
+        min_sample_size: Minimum number of samples required
+
+    Returns:
+        bool: True if column appears to be a primary key based on uniqueness
+    """
+    if not column_values or len(column_values) < min_sample_size:
+        return False
+
+    # Filter out null values
+    non_null = [v for v in column_values if not _is_nullish(v)]
+    if len(non_null) < min_sample_size:
+        return False
+
+    # Calculate uniqueness ratio
+    unique_count = len(set(str(v) for v in non_null))
+    total_count = len(non_null)
+    uniqueness_ratio = unique_count / total_count
+
+    return uniqueness_ratio >= min_uniqueness
+
+
+def _infer_fk_from_sample_data(
+    fk_values: List[Any],
+    pk_values: List[Any],
+    min_sample_size: int = 20,
+) -> float:
+    """
+    Infer FK-PK relationship likelihood from sample data patterns.
+
+    Analyzes uniqueness and value overlap patterns to determine if fk_values
+    could be a foreign key referencing pk_values as primary key.
+
+    Args:
+        fk_values: Sample values from potential FK column
+        pk_values: Sample values from potential PK column
+        min_sample_size: Minimum sample size for reliable inference
+
+    Returns:
+        float: Confidence score (0.0 - 1.0), where:
+               0.0 = No FK-PK relationship
+               0.3 = Weak evidence
+               0.6 = Moderate evidence
+               0.9 = Strong evidence
+    """
+    if not fk_values or not pk_values:
+        return 0.0
+
+    # Filter out null values
+    fk_non_null = [v for v in fk_values if not _is_nullish(v)]
+    pk_non_null = [v for v in pk_values if not _is_nullish(v)]
+
+    if len(fk_non_null) < min_sample_size or len(pk_non_null) < min_sample_size:
+        return 0.0  # Insufficient sample size
+
+    # Calculate uniqueness ratios
+    fk_unique_ratio = len(set(str(v) for v in fk_non_null)) / len(fk_non_null)
+    pk_unique_ratio = len(set(str(v) for v in pk_non_null)) / len(pk_non_null)
+
+    # Calculate value overlap (how many FK values exist in PK values)
+    fk_set = set(str(v) for v in fk_non_null)
+    pk_set = set(str(v) for v in pk_non_null)
+    overlap_ratio = len(fk_set & pk_set) / len(fk_set) if fk_set else 0.0
+
+    # FK-PK pattern characteristics:
+    # 1. PK should have HIGH uniqueness (close to 1.0)
+    # 2. FK can have LOW uniqueness (repeating values OK)
+    # 3. FK values should EXIST in PK values (high overlap)
+
+    confidence = 0.0
+
+    # Factor 1: PK uniqueness (0.0 - 0.4 points)
+    if pk_unique_ratio > 0.95:
+        confidence += 0.4
+    elif pk_unique_ratio > 0.85:
+        confidence += 0.3
+    elif pk_unique_ratio > 0.70:
+        confidence += 0.15
+
+    # Factor 2: Value overlap (0.0 - 0.5 points)
+    # Strong evidence if most FK values exist in PK
+    if overlap_ratio > 0.80:
+        confidence += 0.5
+    elif overlap_ratio > 0.60:
+        confidence += 0.35
+    elif overlap_ratio > 0.40:
+        confidence += 0.2
+    elif overlap_ratio > 0.20:
+        confidence += 0.1
+
+    # Factor 3: FK uniqueness pattern (0.0 - 0.1 points)
+    # FK having lower uniqueness than PK is expected
+    if fk_unique_ratio < pk_unique_ratio:
+        uniqueness_diff = pk_unique_ratio - fk_unique_ratio
+        if uniqueness_diff > 0.3:
+            confidence += 0.1
+        elif uniqueness_diff > 0.1:
+            confidence += 0.05
+
+    return min(confidence, 1.0)
 
 
 def _calculate_adaptive_thresholds(
@@ -1913,6 +2530,10 @@ def _infer_cardinality(
     right_values: List[str],
     left_is_pk: bool,
     right_is_pk: bool,
+    left_table: str = "",
+    right_table: str = "",
+    left_column: str = "",
+    right_column: str = "",
     *,
     adaptive_thresholds: Optional[Dict[str, float]] = None,
 ) -> tuple[str, str]:
@@ -1935,15 +2556,38 @@ def _infer_cardinality(
         min_sample_size = 50
         uniqueness_threshold = 0.95
 
-    # RULE 1: Trust explicit primary key metadata (highest priority)
+    # RULE 1: Logical inference based on primary key metadata (highest priority)
+    # This is universal and works for ANY schema!
+
+    # Standard FK → PK pattern: many-to-one
     if right_is_pk and not left_is_pk:
         return ("*", "1")
 
+    # Reverse PK → FK pattern: one-to-many
     if left_is_pk and not right_is_pk:
         return ("1", "*")
 
+    # Both are PKs: analyze for potential one-to-one relationship
+    # BUT be conservative - 1:1 relationships are rare
     if left_is_pk and right_is_pk:
-        return ("1", "1")
+        # Check if sample data supports 1:1 (need strong evidence)
+        if left_values and right_values:
+            left_non_null = [v for v in left_values if not _is_nullish(v)]
+            right_non_null = [v for v in right_values if not _is_nullish(v)]
+
+            if left_non_null and right_non_null:
+                # Check value overlap - should be high for true 1:1
+                left_set = set(left_non_null)
+                right_set = set(right_non_null)
+                overlap = len(left_set.intersection(right_set))
+
+                # High overlap suggests these might be the same entity
+                if overlap > max(len(left_set), len(right_set)) * 0.8:
+                    return ("1", "1")
+
+        # Default: treat as many-to-one even if both are PKs
+        # (safer assumption, prevents false 1:1 relationships)
+        return ("*", "1")
 
     # RULE 2: Use adaptive uniqueness heuristics with sufficient sample size
     if left_values and right_values:
@@ -1959,6 +2603,16 @@ def _infer_cardinality(
         left_non_null = [v for v in left_values if not _is_nullish(v)]
         right_non_null = [v for v in right_values if not _is_nullish(v)]
 
+        # P2 Fix: Enhanced null and sample quality analysis
+        left_null_ratio = 1 - (len(left_non_null) / len(left_values)) if left_values else 0
+        right_null_ratio = 1 - (len(right_non_null) / len(right_values)) if right_values else 0
+
+        # If too many nulls, be more conservative
+        if left_null_ratio > 0.5 or right_null_ratio > 0.5:
+            # High null ratio suggests data quality issues or optional relationships
+            return ("*", "1")  # Conservative default
+
+        # Calculate uniqueness with improved handling
         left_unique_ratio = (
             len(set(left_non_null)) / len(left_non_null) if left_non_null else 0
         )
@@ -1966,12 +2620,26 @@ def _infer_cardinality(
             len(set(right_non_null)) / len(right_non_null) if right_non_null else 0
         )
 
-        # Apply adaptive uniqueness threshold
-        left_is_unique = left_unique_ratio > uniqueness_threshold
-        right_is_unique = right_unique_ratio > uniqueness_threshold
+        # P2 Fix: Dynamic threshold adjustment based on sample size
+        # Larger samples need higher uniqueness to be considered "unique"
+        adjusted_threshold = uniqueness_threshold
+        if sample_size > 100:
+            adjusted_threshold = min(0.98, uniqueness_threshold + 0.02)
+        elif sample_size > 500:
+            adjusted_threshold = min(0.99, uniqueness_threshold + 0.03)
 
+        # Apply adjusted uniqueness threshold
+        left_is_unique = left_unique_ratio > adjusted_threshold
+        right_is_unique = right_unique_ratio > adjusted_threshold
+
+        # P2 Fix: Additional validation for 1:1 relationships (they are rare)
         if left_is_unique and right_is_unique:
-            return ("1", "1")
+            # Be extra careful with 1:1 - require very high confidence
+            if (left_unique_ratio > 0.98 and right_unique_ratio > 0.98 and
+                sample_size >= min_sample_size * 2):  # Double the sample size requirement
+                return ("1", "1")
+            else:
+                return ("*", "1")  # Default to safer many-to-one
         elif right_is_unique:
             return ("*", "1")
         elif left_is_unique:
@@ -2349,19 +3017,19 @@ def _infer_join_type(
 
 def _is_valid_shared_column_relationship(fk_column: str, pk_column: str, pk_table: str, fk_table: str) -> bool:
     """
-    Validates if a shared column name represents a valid PK-FK relationship.
-
-    This is used for direct column name matches where both tables have the same column name,
-    but only one is a primary key.
+    Pure column-pattern-based validation for shared column relationships.
+    Removes table name dependencies to work with ANY table names.
 
     Args:
         fk_column: Foreign key column name
         pk_column: Primary key column name
-        pk_table: Table containing the primary key
-        fk_table: Table containing the foreign key
+        pk_table: Table containing the primary key (used for equality check only)
+        fk_table: Table containing the foreign key (used for equality check only)
 
     Returns:
-        True if this is a valid relationship, False otherwise
+        True if this is a valid relationship based on column patterns
+
+    P0 Fix: Pure column-name matching without hardcoded table validation
     """
     # For shared column relationships, column names should be identical
     if fk_column.upper() != pk_column.upper():
@@ -2371,163 +3039,290 @@ def _is_valid_shared_column_relationship(fk_column: str, pk_column: str, pk_tabl
     if pk_table.upper() == fk_table.upper():
         return False
 
-    # Special case: avoid creating relationships for generic "id" columns between unrelated tables
-    if pk_column.lower() == "id":
-        # For "id" columns, we should NEVER create relationships based on shared column names
-        # "id" is too generic - relationships should be explicit via {table}_id patterns
-        # This prevents posts.id -> users.id type relationships
+    # Special case: NEVER allow generic "id" shared column relationships
+    if pk_column.upper() == "ID":
+        # "id" is too generic for shared column relationships
+        # Require explicit FK patterns like {entity}_id instead
         return False
 
-    # For non-"id" columns with identical names, be more permissive
-    # The fact that they have identical names and one is PK suggests intention
-    return True
+    # For non-"id" columns with identical names, validate column meaningfulness
+    column_upper = pk_column.upper()
+
+    # Reject generic column names that shouldn't form relationships
+    generic_columns = _GENERIC_IDENTIFIER_TOKENS | {
+        "TYPE", "STATUS", "STATE", "ACTIVE", "ENABLED", "DELETED",
+        "CREATED", "UPDATED", "MODIFIED", "VERSION", "LEVEL"
+    }
+
+    if column_upper in generic_columns:
+        return False
+
+    # For meaningful specific column names, allow the relationship
+    # Examples: account_number, product_sku, order_reference, etc.
+    return len(column_upper) >= 3  # Require minimum meaningful length
 
 
 def _are_tables_semantically_related(table_a: str, table_b: str) -> bool:
-    """Check if two tables are semantically related for relationship purposes."""
+    """
+    Pattern-based semantic relationship detection without hardcoded table names.
+
+    P0 Fix: Removes hardcoded table pairs to work with ANY table names.
+    Uses naming patterns to infer relationships instead.
+    """
     # Convert to upper for comparison
     table_a_upper = table_a.upper()
     table_b_upper = table_b.upper()
 
-    # Known semantic relationships
-    semantic_pairs = {
-        ("USERS", "POSTS"), ("USERS", "COMMENTS"), ("USERS", "PROFILES"),
-        ("POSTS", "COMMENTS"), ("CUSTOMERS", "ORDERS"), ("ORDERS", "ORDER_ITEMS"),
-        ("PRODUCTS", "ORDER_ITEMS"), ("EMPLOYEES", "SALARIES"), ("PARENT", "CHILD"),
-        ("MAIN", "DETAILS"), ("MASTER", "DETAIL"),
-    }
+    # Don't relate identical tables
+    if table_a_upper == table_b_upper:
+        return False
 
-    # Check both directions
-    pair1 = (table_a_upper, table_b_upper)
-    pair2 = (table_b_upper, table_a_upper)
+    # Pattern 1: Hierarchical relationships (parent/child naming)
+    hierarchical_patterns = [
+        ("PARENT", "CHILD"), ("MASTER", "DETAIL"), ("MAIN", "SUB"),
+        ("PRIMARY", "SECONDARY"), ("BASE", "DERIVED"), ("HEAD", "LINE")
+    ]
 
-    return pair1 in semantic_pairs or pair2 in semantic_pairs
+    for parent_pattern, child_pattern in hierarchical_patterns:
+        if (parent_pattern in table_a_upper and child_pattern in table_b_upper) or \
+           (child_pattern in table_a_upper and parent_pattern in table_b_upper):
+            return True
+
+    # Pattern 2: Entity-Detail relationships (table_name + table_name_items/details)
+    if table_a_upper.endswith("_ITEMS") or table_a_upper.endswith("_DETAILS"):
+        base_name = table_a_upper.replace("_ITEMS", "").replace("_DETAILS", "")
+        if base_name == table_b_upper:
+            return True
+
+    if table_b_upper.endswith("_ITEMS") or table_b_upper.endswith("_DETAILS"):
+        base_name = table_b_upper.replace("_ITEMS", "").replace("_DETAILS", "")
+        if base_name == table_a_upper:
+            return True
+
+    # Pattern 3: Dimensional relationships (dim_ prefix patterns)
+    if table_a_upper.startswith("DIM_") and not table_b_upper.startswith("DIM_"):
+        return True
+    if table_b_upper.startswith("DIM_") and not table_a_upper.startswith("DIM_"):
+        return True
+
+    # Pattern 4: Fact-Dimension relationships (fact_ + dim_ patterns)
+    if table_a_upper.startswith("FACT_") and table_b_upper.startswith("DIM_"):
+        return True
+    if table_b_upper.startswith("FACT_") and table_a_upper.startswith("DIM_"):
+        return True
+
+    # Default: Consider tables potentially related to allow FK discovery
+    # Let column-based matching be the primary filter
+    return True
 
 
 def _is_valid_suffix_match(fk_column: str, pk_column: str, pk_table: str) -> bool:
     """
-    Validates if a suffix match is semantically meaningful to avoid over-matching.
+    Enhanced column-name-based validation that supports multiple naming conventions.
 
     Args:
         fk_column: Foreign key column name (normalized)
         pk_column: Primary key column name (normalized)
-        pk_table: Primary key table name
+        pk_table: Primary key table name (used for advanced matching)
 
     Returns:
-        True if the suffix match is valid, False otherwise
+        True if this appears to be a valid FK->PK relationship based on column patterns
+
+    Universal Rules (applicable to any schema):
+    1. For pk_column == "id": Only allow well-structured FK columns with meaningful prefixes
+    2. For other pk_columns: Apply pattern-based validation
+    3. Universal support: Handle prefix-based naming (table_entity_key patterns)
+    4. Focus on column naming patterns while leveraging table context when helpful
     """
-    # Avoid matching very short generic primary key names (but allow "id")
+    # Normalize inputs
+    fk_column = fk_column.strip().upper()
+    pk_column = pk_column.strip().upper()
+    pk_table = pk_table.strip().upper()
+
     if len(pk_column) < 2:
         return False
 
-    # Special handling for "id" - only allow if there's a semantic prefix
-    if pk_column.lower() == "id":
-        # Only allow if the FK column has a meaningful prefix with separator
-        if "_" not in fk_column and fk_column.lower() != "id":
+    # Special handling for "id" primary keys (most restrictive)
+    if pk_column == "ID":
+        # Reject bare "id" to "id" matches (too generic)
+        if fk_column == "ID":
             return False
 
-        # Extract prefix from FK column (everything before the last "_id")
-        if fk_column.lower().endswith("_id"):
-            prefix = fk_column[:-3]  # Remove "_id"
-            if len(prefix) == 0:
-                return False
+        # Only allow if FK column has underscore structure and meaningful prefix
+        if not fk_column.endswith("_ID"):
+            return False
 
-            # Check if prefix relates to the PK table semantically
-            pk_table_variants = _table_variants(pk_table)
-            prefix_upper = prefix.upper()
+        prefix = fk_column[:-3]  # Remove "_ID" suffix
+        if len(prefix) < 2:  # Require meaningful prefix length
+            return False
 
-            # Allow if prefix matches table name variants
-            for variant in pk_table_variants:
-                if prefix_upper == variant:
+        # Reject generic prefixes that don't indicate relationships
+        generic_prefixes = {"PARENT", "CHILD", "REF", "REFERENCE", "FK", "FOREIGN"}
+        if prefix in generic_prefixes:
+            return False
+
+        # Allow if prefix appears to be a meaningful entity name
+        return True
+
+    # For non-"id" columns, use direct pattern matching
+    if fk_column == pk_column:
+        return True  # Exact match is always valid
+
+    # Universal support: Handle prefix-based naming conventions
+    # Example: l_partkey (FK) should match p_partkey (PK) when pk_table is PART
+    if "_" in fk_column and "_" in pk_column:
+        # Extract the core identifiers (remove table prefixes)
+        fk_parts = fk_column.split("_", 1)
+        pk_parts = pk_column.split("_", 1)
+
+        if len(fk_parts) == 2 and len(pk_parts) == 2:
+            fk_core = fk_parts[1]  # PARTKEY from L_PARTKEY
+            pk_core = pk_parts[1]  # PARTKEY from P_PARTKEY
+
+            # Core identifiers match (e.g., PARTKEY == PARTKEY)
+            if fk_core == pk_core:
+                return True
+
+            # Handle entity-based cores (e.g., CUSTKEY and table CUSTOMER)
+            # Check if pk_core relates to pk_table semantically
+            if _is_entity_key_match(pk_core, pk_table):
+                # Also check if fk_core could reference the same entity
+                if _is_entity_key_match(fk_core, pk_table):
                     return True
 
-            # Only allow if prefix is semantically related to the table
-            # Don't use a broad common_prefixes list as it creates false matches
-            # The table variants check above should handle most valid cases
+    # For structured FK columns, check if they reference the PK column
+    if "_" in fk_column:
+        # Pattern: {entity}_{pk_column}
+        if fk_column.endswith(f"_{pk_column}"):
+            prefix = fk_column[:-(len(pk_column) + 1)]
+            return len(prefix) >= 2  # Meaningful prefix required
 
-            return False
+        # Pattern: {pk_column}_{suffix}
+        if fk_column.startswith(f"{pk_column}_"):
+            suffix = fk_column[len(pk_column) + 1:]
+            return len(suffix) >= 1  # Some suffix required
 
-    # For non-"id" columns without separators, allow only if the suffix removal reveals table affinity
-    if "_" not in fk_column:
-        fk_upper = fk_column.upper()
-        pk_table_variants = _table_variants(pk_table)
-        if fk_upper.endswith('KEY') and len(fk_upper) > 3:
-            prefix = fk_upper[:-3]
-            if prefix in pk_table_variants:
+    # Allow if FK contains PK column as a component (for compound names)
+    if pk_column in fk_column and pk_column != fk_column:
+        return len(pk_column) >= 3  # Avoid very short component matches
+
+    return False
+
+
+def _is_entity_key_match(key_column: str, table_name: str) -> bool:
+    """
+    Check if a key column semantically relates to a table entity.
+
+    Examples:
+    - CUSTKEY relates to CUSTOMER table
+    - PARTKEY relates to PART table
+    - ORDERKEY relates to ORDERS table
+    """
+    key_column = key_column.upper()
+    table_name = table_name.upper()
+
+    # Direct matches
+    if key_column.endswith("KEY"):
+        entity_part = key_column[:-3]  # Remove "KEY" suffix
+
+        # Check various entity name patterns
+        entity_patterns = [
+            entity_part,
+            entity_part + "S",  # Plural
+            entity_part[:-1] if entity_part.endswith("S") else None,  # Singular
+        ]
+
+        for pattern in entity_patterns:
+            if pattern and (pattern == table_name or pattern in table_name or table_name in pattern):
                 return True
-        if fk_upper.endswith('ID') and len(fk_upper) > 2:
-            prefix = fk_upper[:-2]
-            if prefix in pk_table_variants:
-                return True
-        return False
 
-    # Additional length check to avoid very short matches
-    if fk_column != pk_column and len(fk_column) - len(pk_column) < 2:
-        return False
-
-    return True
+    return False
 
 
 def _looks_like_foreign_key(fk_table: str, pk_table: str, fk_column: str) -> bool:
     """
-    Enhanced heuristic to detect if a column looks like a foreign key.
-    Checks patterns like: customer_id, cust_id, customer_key, etc.
+    Universal column-pattern-based heuristic to detect foreign key columns.
+    Supports multiple naming conventions including prefix-based patterns.
+
+    Args:
+        fk_table: Foreign key table name (used for context)
+        pk_table: Primary key table name (used for context)
+        fk_column: Foreign key column name
+
+    Returns:
+        True if the column pattern suggests it's a foreign key
+
+    Universal: Supports both standard patterns and prefix-based naming
     """
     fk_upper = fk_column.strip().upper()
-    pk_table_variants = _table_variants(pk_table)
+    fk_table_upper = fk_table.strip().upper()
+    pk_table_upper = pk_table.strip().upper()
 
-    # Pattern 1: {table_name}_id or {table_name}_key
-    for variant in pk_table_variants:
-        if fk_upper in {
-            f"{variant}_ID",
-            f"{variant}ID",
-            f"{variant}_KEY",
-            f"{variant}KEY",
-        }:
-            return True
+    # Pattern 1: Standard FK patterns {entity}_id, {entity}_key
+    if fk_upper.endswith("_ID") or fk_upper.endswith("_KEY"):
+        prefix = fk_upper[:-3] if fk_upper.endswith("_ID") else fk_upper[:-4]
+        if len(prefix) >= 2:  # Meaningful prefix required
+            # Reject generic prefixes that don't indicate relationships
+            generic_prefixes = {"PARENT", "CHILD", "REF", "REFERENCE", "FK", "FOREIGN", "MAIN", "SUPER"}
+            if prefix not in generic_prefixes:
+                if _column_mentions_table(fk_column, pk_table):
+                    return True
 
-    # Pattern 2: Column ends with table name variants
+    # Pattern 2: Universal prefix-based naming
+    # Examples: o_custkey (ORDERS -> CUSTOMER), l_partkey (LINEITEM -> PART)
+    if "_" in fk_upper:
+        parts = fk_upper.split("_", 1)
+        if len(parts) == 2:
+            fk_prefix, fk_core = parts
+
+            # Check if the FK core represents a meaningful entity reference
+            if fk_core.endswith("KEY") and len(fk_core) > 3:
+                # Check if this could be referencing the pk_table entity
+                if _is_entity_key_match(fk_core, pk_table_upper):
+                    return True
+
+    # Pattern 3: Compound FK columns with entity tokens
     tokens = _identifier_tokens(fk_column)
     if len(tokens) >= 2:
-        # e.g., order_customer_id -> check if CUSTOMER is in pk_table_variants
-        for i in range(len(tokens) - 1):
-            if tokens[i] in pk_table_variants:
-                tail = tokens[-1]
-                if tail in {"ID", "KEY"}:
+        tail = tokens[-1]
+        if tail in {"ID", "KEY"}:
+            # Check if any token before the tail suggests an entity name
+            for i in range(len(tokens) - 1):
+                token = tokens[i]
+                # Accept meaningful entity-like tokens (non-generic)
+                if (
+                    len(token) >= 2
+                    and token not in _GENERIC_IDENTIFIER_TOKENS
+                    and _column_mentions_table(fk_column, pk_table)
+                ):
                     return True
 
-    # Pattern 3: Similar to primary key column but with FK table prefix
-    # e.g., order_id in order_items table referencing orders.id
-    fk_table_variants = _table_variants(fk_table)
-    for fk_variant in fk_table_variants:
-        if fk_upper.startswith(fk_variant):
-            remainder = fk_upper[len(fk_variant) :].lstrip("_")
-            for pk_variant in pk_table_variants:
-                if remainder.startswith(pk_variant):
-                    return True
-
-    # Pattern 4: Enhanced support for non-standard table names
-    # Support patterns like foo_id, bar_id, alpha_id, beta_id
-    if fk_upper.endswith("_ID") or fk_upper.endswith("ID"):
-        # Extract prefix (e.g., "FOO" from "FOO_ID")
-        if fk_upper.endswith("_ID"):
-            prefix = fk_upper[:-3]
-        else:
-            prefix = fk_upper[:-2]
-
-        # Check if prefix matches any table variant
-        if prefix in pk_table_variants:
+    # Pattern 4: Concatenated forms like customerid, orderkey
+    if fk_upper.endswith("ID") and len(fk_upper) > 3:
+        prefix = fk_upper[:-2]
+        if (
+            len(prefix) >= 3
+            and prefix not in _GENERIC_IDENTIFIER_TOKENS
+            and _column_mentions_table(fk_column, pk_table)
+        ):
             return True
 
-        # Special case: Allow single-word meaningful prefixes
-        meaningful_prefixes = {
-            "ALPHA", "BETA", "GAMMA", "DELTA",
-            "MASTER", "DETAIL", "PARENT", "CHILD",
-            "FOO", "BAR", "SOURCE", "TARGET",
-            "LEFT", "RIGHT", "FIRST", "SECOND"
-        }
-        if prefix in meaningful_prefixes and prefix in pk_table_variants:
+    if fk_upper.endswith("KEY") and len(fk_upper) > 4:
+        prefix = fk_upper[:-3]
+        if (
+            len(prefix) >= 3
+            and prefix not in _GENERIC_IDENTIFIER_TOKENS
+            and _column_mentions_table(fk_column, pk_table)
+        ):
             return True
+
+    # Pattern 5: Allow meaningful descriptive columns
+    meaningful_patterns = {
+        "CREATED_BY", "UPDATED_BY", "MODIFIED_BY", "ASSIGNED_TO",
+        "OWNED_BY", "MANAGED_BY", "APPROVED_BY", "REQUESTED_BY"
+    }
+    if fk_upper in meaningful_patterns:
+        return True
 
     return False
 
@@ -2645,11 +3440,18 @@ def _infer_relationships(
         columns_meta: Dict[str, Dict[str, Any]] = {}
         pk_candidates: Dict[str, List[str]] = defaultdict(list)
         table_prefixes = global_prefixes | _table_prefixes(raw_table.name)
+        has_explicit_pk = any(getattr(column, "is_primary_key", False) for column in raw_table.columns)
+
         for column in raw_table.columns:
             base_type = _base_type_from_type(column.column_type)
             normalized = _sanitize_identifier_name(
                 column.column_name, prefixes_to_drop=table_prefixes
             )
+
+            # CRITICAL FIX: If normalization results in empty string, use original column name
+            # This prevents column collisions when multiple columns normalize to ''
+            if not normalized:
+                normalized = column.column_name.upper()
             entry = columns_meta.setdefault(
                 normalized,
                 {
@@ -2673,8 +3475,25 @@ def _infer_relationships(
                 if column.column_name not in pk_candidates[normalized]:
                     pk_candidates[normalized].append(column.column_name)
                 continue
-            if _looks_like_primary_key(raw_table.name, column.column_name):
+            if (
+                not has_explicit_pk
+                and _looks_like_primary_key(raw_table.name, column.column_name)
+            ):
                 pk_candidates[normalized].append(column.column_name)
+
+            # ENHANCEMENT: Infer PK from sample data when column naming is poor
+            # This allows PK detection for columns like 'uid', 'oid', 'pid' etc.
+            if (
+                not has_explicit_pk
+                and column.column_name not in pk_candidates[normalized]
+                and column.values
+            ):
+                # Check if sample data shows high uniqueness (PK pattern)
+                if _infer_pk_from_sample_data(column.values, min_uniqueness=0.95, min_sample_size=20):
+                    pk_candidates[normalized].append(column.column_name)
+                    # Mark it as inferred from data
+                    entry["pk_inferred_from_data"] = True
+
         metadata[raw_table.name] = {
             "fqn": fqn,
             "columns": columns_meta,
@@ -2707,23 +3526,34 @@ def _infer_relationships(
                 status_dict["limited_by_max_relationships"] = True
                 limit_reached = True
 
-    table_names = list(metadata.keys())
-    for i in range(len(table_names)):
-        if limit_reached or status_dict["limited_by_timeout"]:
-            break
-        if _timed_out():
-            status_dict["limited_by_timeout"] = True
-            break
-        for j in range(i + 1, len(table_names)):
-            if limit_reached or status_dict["limited_by_timeout"]:
-                break
-            if _timed_out():
-                status_dict["limited_by_timeout"] = True
-                break
-            table_a_name = table_names[i]
-            table_b_name = table_names[j]
-            table_a = metadata[table_a_name]
-            table_b = metadata[table_b_name]
+    # Use optimized relationship candidate generation instead of nested loops
+    _generate_optimized_relationship_candidates(metadata, _record_pair, status_dict, _timed_out)
+
+    # Calculate global adaptive thresholds for the entire schema (moved from below)
+    all_schema_values = []
+    for table_meta in metadata.values():
+        for col_meta in table_meta["columns"].values():
+            if col_meta.get("values"):
+                all_schema_values.append(col_meta["values"])
+    global_adaptive_thresholds = _calculate_adaptive_thresholds(
+        all_schema_values,
+        table_count=len(raw_tables),
+        base_sample_size=10,  # Default base
+    )
+
+    # DISABLED: Shared column logic and old bidirectional matching
+    # The optimized _generate_optimized_relationship_candidates() function
+    # already handles all FK-PK matching with proper semantic validation.
+    # Skipping the old logic to avoid duplicate and incorrect relationships.
+
+    # All candidate generation is now done by _generate_optimized_relationship_candidates()
+    # which was called earlier. We jump directly to "Build relationships with inferred cardinality"
+
+    if False:  # Old shared column logic (permanently disabled)
+        for table_a_name, table_a in metadata.items():
+            for table_b_name, table_b in metadata.items():
+                if table_a_name == table_b_name:
+                    continue
 
             shared = set(table_a["columns"].keys()) & set(table_b["columns"].keys())
             for col_key in shared:
@@ -2737,7 +3567,9 @@ def _infer_relationships(
                 # Apply semantic validation for shared column relationships
                 # Only create relationships when there's clear PK-FK semantics
                 if in_pk_a and not in_pk_b:
-                    if _is_valid_shared_column_relationship(col_key, col_key, table_a_name, table_b_name):
+                    if _is_valid_shared_column_relationship(
+                        col_key, col_key, table_a_name, table_b_name
+                    ):
                         _record_pair(
                             table_b_name,
                             table_a_name,
@@ -2745,7 +3577,9 @@ def _infer_relationships(
                             meta_a["names"][0],
                         )
                 elif in_pk_b and not in_pk_a:
-                    if _is_valid_shared_column_relationship(col_key, col_key, table_b_name, table_a_name):
+                    if _is_valid_shared_column_relationship(
+                        col_key, col_key, table_b_name, table_a_name
+                    ):
                         _record_pair(
                             table_a_name,
                             table_b_name,
@@ -2772,117 +3606,147 @@ def _infer_relationships(
 
             # Enhanced suffix-based matches with name similarity
             # Pattern 1: Direct suffix match (e.g. order_date_id -> date_id)
+            # Collect all candidate matches and select the best one based on similarity score
             for pk_norm, pk_cols in table_a["pk_candidates"].items():
                 pk_meta = table_a["columns"].get(pk_norm)
                 if not pk_meta:
                     continue
+
+                # Collect all candidate matches for this PK with their scores
+                # Tuple format: (score, similarity, is_single_pk, norm_b, meta_b)
+                candidates: List[tuple[float, float, bool, str, Dict[str, Any]]] = []
+
+                # Count primary keys in table_a for tiebreaking
+                pk_count_a = len(table_a.get("pk_candidates", {}))
+                is_single_pk_a = (pk_count_a == 1)
+
                 for norm_b, meta_b in table_b["columns"].items():
                     if meta_b["base_type"] != pk_meta["base_type"]:
                         continue
                     if norm_b == pk_norm:
                         continue
 
+                    # Calculate name similarity for ranking
+                    similarity = _name_similarity(norm_b, pk_norm)
+
                     # Direct suffix match with improved logic to avoid over-matching
-                    if norm_b.endswith(pk_norm) and _is_valid_suffix_match(norm_b, pk_norm, table_a_name):
-                        _record_pair(
-                            table_b_name,
-                            table_a_name,
-                            meta_b["names"][0],
-                            pk_cols[0],
-                        )
-                        continue
+                    if norm_b.endswith(pk_norm) and _is_valid_suffix_match(
+                        norm_b, pk_norm, table_a_name
+                    ):
+                        # Higher score for suffix matches, but still use similarity for ranking
+                        # Suffix match gets a bonus, but exact/close name match should still win
+                        score = similarity + 0.3  # Bonus for suffix match
+                        candidates.append((score, similarity, is_single_pk_a, norm_b, meta_b))
+                        # Don't continue - check if there are better matches
 
                     # Enhanced: Check if column looks like a foreign key to this table
-                    if _looks_like_foreign_key(
+                    elif _looks_like_foreign_key(
                         table_b_name, table_a_name, meta_b["names"][0]
                     ):
-                        # Additional check: name similarity with adaptive threshold
-                        similarity = _name_similarity(norm_b, pk_norm)
-                        # Calculate adaptive threshold for this relationship
-                        all_sample_values = []
-                        for col_values in [
-                            pk_meta.get("values", []),
-                            meta_b.get("values", []),
-                        ]:
-                            if col_values:
-                                all_sample_values.append(col_values)
+                        # CRITICAL FIX: When _looks_like_foreign_key confirms it's a FK,
+                        # don't apply similarity threshold - the pattern match is enough evidence
+                        # Use similarity as the score for FK pattern matches
+                        candidates.append((similarity, similarity, is_single_pk_a, norm_b, meta_b))
 
-                        adaptive_thresholds = _calculate_adaptive_thresholds(
-                            all_sample_values,
-                            table_count=len(raw_tables),
-                            base_sample_size=(
-                                len(pk_meta.get("values", []))
-                                if pk_meta.get("values")
-                                else 10
-                            ),
-                        )
-                        similarity_threshold = adaptive_thresholds.get(
-                            "similarity_threshold", 0.6
-                        )
+                # CRITICAL FIX: Record ALL valid candidates, not just the best one
+                # A primary key can be referenced by multiple foreign keys
+                # (e.g., PART.P_PARTKEY is referenced by both PARTSUPP.PS_PARTKEY and LINEITEM.L_PARTKEY)
+                if candidates:
+                    # Sort by: 1) score (desc), 2) similarity (desc), 3) is_single_pk (desc)
+                    # This prefers single-column PKs over composite PKs when scores are equal
+                    candidates.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
 
-                        if similarity >= similarity_threshold:
+                    # Record all candidates that meet minimum quality threshold
+                    # Use a lower threshold to avoid missing valid relationships
+                    min_quality_threshold = 0.3
+
+                    for score, similarity, is_single_pk, norm_b, meta_b in candidates:
+                        # Only record if similarity meets minimum threshold
+                        if similarity >= min_quality_threshold:
+                            # DEBUG: Log candidate selection for LINEITEM FK columns
+                            if table_b_name.upper() == "LINEITEM" and meta_b["names"][0].upper() in ["L_PARTKEY", "L_SUPPKEY"]:
+                                print(f"\n  🔍 DEBUG: LINEITEM FK candidate recorded")
+                                print(f"     FK column: {meta_b['names'][0].upper()}")
+                                print(f"     Target table: {table_a_name}")
+                                print(f"     Target PK: {pk_cols[0].upper()}")
+                                print(f"     Score: {score:.3f}, Similarity: {similarity:.3f}, Single PK: {is_single_pk}")
+
                             _record_pair(
                                 table_b_name,
                                 table_a_name,
-                                meta_b["names"][0],
-                                pk_cols[0],
+                                meta_b["names"][0].upper(),
+                                pk_cols[0].upper(),
                             )
 
             # Pattern 2: Reverse direction
+            # Collect all candidate matches and select the best one based on similarity score
             for pk_norm, pk_cols in table_b["pk_candidates"].items():
                 pk_meta = table_b["columns"].get(pk_norm)
                 if not pk_meta:
                     continue
+
+                # Collect all candidate matches for this PK with their scores
+                # Tuple format: (score, similarity, is_single_pk, norm_a, meta_a)
+                candidates = []
+
+                # Count primary keys in table_b for tiebreaking
+                pk_count_b = len(table_b.get("pk_candidates", {}))
+                is_single_pk_b = (pk_count_b == 1)
+
                 for norm_a, meta_a in table_a["columns"].items():
                     if meta_a["base_type"] != pk_meta["base_type"]:
                         continue
                     if norm_a == pk_norm:
                         continue
 
+                    # Calculate name similarity for ranking
+                    similarity = _name_similarity(norm_a, pk_norm)
+
                     # Direct suffix match
-                    if norm_a.endswith(pk_norm):
-                        _record_pair(
-                            table_a_name,
-                            table_b_name,
-                            meta_a["names"][0],
-                            pk_cols[0],
-                        )
-                        continue
+                    if norm_a.endswith(pk_norm) and _is_valid_suffix_match(
+                        norm_a, pk_norm, table_b_name
+                    ):
+                        # Higher score for suffix matches, but still use similarity for ranking
+                        # Suffix match gets a bonus, but exact/close name match should still win
+                        score = similarity + 0.3  # Bonus for suffix match
+                        candidates.append((score, similarity, is_single_pk_b, norm_a, meta_a))
+                        # Don't continue - check if there are better matches
 
                     # Enhanced: Check if column looks like a foreign key to this table
-                    if _looks_like_foreign_key(
+                    elif _looks_like_foreign_key(
                         table_a_name, table_b_name, meta_a["names"][0]
                     ):
-                        # Additional check: name similarity with adaptive threshold
-                        similarity = _name_similarity(norm_a, pk_norm)
-                        # Calculate adaptive threshold for this relationship
-                        all_sample_values = []
-                        for col_values in [
-                            pk_meta.get("values", []),
-                            meta_a.get("values", []),
-                        ]:
-                            if col_values:
-                                all_sample_values.append(col_values)
+                        # CRITICAL FIX: When _looks_like_foreign_key confirms it's a FK,
+                        # don't apply similarity threshold - the pattern match is enough evidence
+                        # Use similarity as the score for FK pattern matches
+                        candidates.append((similarity, similarity, is_single_pk_b, norm_a, meta_a))
 
-                        adaptive_thresholds = _calculate_adaptive_thresholds(
-                            all_sample_values,
-                            table_count=len(raw_tables),
-                            base_sample_size=(
-                                len(pk_meta.get("values", []))
-                                if pk_meta.get("values")
-                                else 10
-                            ),
-                        )
-                        similarity_threshold = adaptive_thresholds.get(
-                            "similarity_threshold", 0.6
-                        )
+                # CRITICAL FIX: Record ALL valid candidates, not just the best one
+                # A primary key can be referenced by multiple foreign keys
+                if candidates:
+                    # Sort by: 1) score (desc), 2) similarity (desc), 3) is_single_pk (desc)
+                    # This prefers single-column PKs over composite PKs when scores are equal
+                    candidates.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
 
-                        if similarity >= similarity_threshold:
+                    # Record all candidates that meet minimum quality threshold
+                    min_quality_threshold = 0.3
+
+                    for score, similarity, is_single_pk, norm_a, meta_a in candidates:
+                        # Only record if similarity meets minimum threshold
+                        if similarity >= min_quality_threshold:
+                            # DEBUG: Log candidate selection for LINEITEM FK columns
+                            if table_a_name.upper() == "LINEITEM" and meta_a["names"][0].upper() in ["L_PARTKEY", "L_SUPPKEY"]:
+                                print(f"\n  🔍 DEBUG: LINEITEM FK candidate recorded (reverse)")
+                                print(f"     FK column: {meta_a['names'][0].upper()}")
+                                print(f"     Target table: {table_b_name}")
+                                print(f"     Target PK: {pk_cols[0].upper()}")
+                                print(f"     Score: {score:.3f}, Similarity: {similarity:.3f}, Single PK: {is_single_pk}")
+
                             _record_pair(
                                 table_a_name,
                                 table_b_name,
-                                meta_a["names"][0],
-                                pk_cols[0],
+                                meta_a["names"][0].upper(),
+                                pk_cols[0].upper(),
                             )
 
     # Calculate global adaptive thresholds for the entire schema
@@ -2898,6 +3762,135 @@ def _infer_relationships(
         base_sample_size=10,  # Default base
     )
 
+    def _pk_name_set(table_meta: Dict[str, Any]) -> set[str]:
+        pk_names: set[str] = set()
+        for pk_list in table_meta.get("pk_candidates", {}).values():
+            for name in pk_list:
+                pk_names.add(name.upper())
+        return pk_names
+
+    emitted_relationship_signatures: set[tuple[str, str, tuple[tuple[str, str], ...]]] = set()
+    domain_patterns_cache = _get_domain_knowledge_patterns()
+
+    # CRITICAL FIX: Deduplicate bidirectional relationships
+    # Keep the correct direction (FK -> PK) to avoid duplicates like ORDERS<->LINEITEM
+    print(f"\n🔧 Deduplicating relationships: {len(pairs)} candidate pairs before dedup")
+    for i, ((lt, rt), cols) in enumerate(pairs.items(), 1):
+        col_str = ", ".join(f"{l}→{r}" for l, r in cols)
+        print(f"  {i}. {lt} → {rt}: [{col_str}]")
+    deduplicated_pairs = {}
+    for (left_table, right_table), column_pairs in pairs.items():
+        # Create a canonical key (sorted table names)
+        canonical_key = tuple(sorted([left_table, right_table]))
+        reverse_key = (right_table, left_table)
+
+        # If we already have the reverse direction, decide which one to keep
+        if reverse_key in deduplicated_pairs:
+            # Get metadata to determine the correct direction
+            left_meta = metadata.get(left_table, {})
+            right_meta = metadata.get(right_table, {})
+
+            # Extract the columns involved in the relationship
+            # column_pairs is a list of tuples: [(left_col, right_col), ...]
+            current_pairs_list = list(column_pairs) if column_pairs else []
+            reverse_pairs_list = list(deduplicated_pairs[reverse_key]) if deduplicated_pairs[reverse_key] else []
+
+            # For simplicity, check the first pair (most relationships have only one pair)
+            current_left_col = current_pairs_list[0][0] if current_pairs_list else None
+            current_right_col = current_pairs_list[0][1] if current_pairs_list else None
+            reverse_left_col = reverse_pairs_list[0][0] if reverse_pairs_list else None
+            reverse_right_col = reverse_pairs_list[0][1] if reverse_pairs_list else None
+
+            # Check which direction is FK -> PK
+            # Current direction: left_table.current_left_col -> right_table.current_right_col
+            # Reverse direction: right_table.reverse_left_col -> left_table.reverse_right_col
+
+            left_pk_set = _pk_name_set(left_meta)
+            right_pk_set = _pk_name_set(right_meta)
+
+            current_right_is_pk = current_right_col and current_right_col.upper() in right_pk_set
+            reverse_right_is_pk = reverse_right_col and reverse_right_col.upper() in left_pk_set
+
+            # CRITICAL: When both sides have PK, check which one is a composite PK
+            # The correct direction is: composite PK column (FK) -> single PK (referenced PK)
+            # Current: left_table.current_left_col -> right_table.current_right_col
+            # Check if left_table has composite PK (len > 1)
+            current_left_is_composite_pk = current_left_col and current_left_col.upper() in left_pk_set and len(left_pk_set) > 1
+            # Reverse: right_table.reverse_left_col -> left_table.reverse_right_col
+            # Check if right_table has composite PK (len > 1)
+            reverse_left_is_composite_pk = reverse_left_col and reverse_left_col.upper() in right_pk_set and len(right_pk_set) > 1
+
+            # If current direction is FK->PK but reverse is not, replace with current
+            if current_right_is_pk and not reverse_right_is_pk:
+                print(f"  🔄 Replacing {reverse_key[0]} → {reverse_key[1]} with {left_table} → {right_table} (correct FK->PK direction)")
+                del deduplicated_pairs[reverse_key]
+                deduplicated_pairs[(left_table, right_table)] = column_pairs
+            # If reverse is FK->PK but current is not, keep reverse (skip current)
+            elif reverse_right_is_pk and not current_right_is_pk:
+                print(f"  ⚠️  Skipping {left_table} → {right_table} (keeping {reverse_key[0]} → {reverse_key[1]} as correct FK->PK direction)")
+                continue
+            # If both have PK on right side, need to determine which is the true FK->PK relationship
+            elif current_right_is_pk and reverse_right_is_pk:
+                # Current: left_table.current_left_col -> right_table.current_right_col
+                # Reverse: right_table.reverse_left_col -> left_table.reverse_right_col
+
+                # Check if left columns are part of their respective table's PK
+                current_left_is_pk = current_left_col and current_left_col.upper() in left_pk_set
+                reverse_left_is_pk = reverse_left_col and reverse_left_col.upper() in right_pk_set
+
+                # DEBUG: PK analysis (commented out for production)
+                # print(f"  🔍 PK analysis for {left_table}.{current_left_col} → {right_table}.{current_right_col}:")
+                # print(f"      Reverse is: {reverse_key[0]}.{reverse_left_col} → {reverse_key[1]}.{reverse_right_col}")
+                # print(f"      Current left_is_pk={current_left_is_pk}, reverse left_is_pk={reverse_left_is_pk}")
+                # print(f"      left_pk_set={left_pk_set}, right_pk_set={right_pk_set}")
+
+                # Prefer the direction where the left column is NOT a PK (it's a pure FK)
+                if not current_left_is_pk and reverse_left_is_pk:
+                    # Current direction is better: left is FK, right is PK
+                    print(f"  🔄 Replacing {reverse_key[0]} → {reverse_key[1]} with {left_table} → {right_table} (left is FK, not PK)")
+                    del deduplicated_pairs[reverse_key]
+                    deduplicated_pairs[(left_table, right_table)] = column_pairs
+                elif current_left_is_pk and not reverse_left_is_pk:
+                    # Reverse direction is better: its left is FK, its right is PK
+                    print(f"  ⚠️  Skipping {left_table} → {right_table} (keeping {reverse_key[0]} → {reverse_key[1]}, reverse left is FK)")
+                    continue
+                # Both left columns are part of composite PKs - prefer composite PK with more columns
+                elif current_left_is_composite_pk and not reverse_left_is_composite_pk:
+                    print(f"  🔄 Replacing {reverse_key[0]} → {reverse_key[1]} with {left_table} → {right_table} (left has composite PK, correct FK->PK)")
+                    del deduplicated_pairs[reverse_key]
+                    deduplicated_pairs[(left_table, right_table)] = column_pairs
+                elif reverse_left_is_composite_pk and not current_left_is_composite_pk:
+                    print(f"  ⚠️  Skipping {left_table} → {right_table} (keeping {reverse_key[0]} → {reverse_key[1]}, reverse has composite PK)")
+                    continue
+                else:
+                    # Both have same structure - check if neither is PK (both are pure FKs)
+                    if not current_left_is_pk and not reverse_left_is_pk:
+                        # Both left columns are FKs - this is a valid bidirectional relationship!
+                        # Keep the first one (reverse), skip current
+                        print(f"  ⚠️  Skipping duplicate: {left_table} → {right_table} (both have same FK->PK pattern)")
+                        continue
+                    else:
+                        print(f"  ⚠️  Skipping duplicate: {left_table} → {right_table} (both have same PK structure)")
+                        continue
+            # If neither has PK, keep the first one encountered
+            else:
+                print(f"  ⚠️  Skipping duplicate: {left_table} → {right_table} (reverse of {right_table} → {left_table} already exists)")
+                continue
+
+        # Check if we already processed this canonical pair (different column combinations)
+        if canonical_key in [(tuple(sorted([l, r]))) for (l, r) in deduplicated_pairs.keys()]:
+            # Already have this pair, skip
+            existing = [(l, r) for (l, r) in deduplicated_pairs.keys()
+                       if tuple(sorted([l, r])) == canonical_key]
+            if existing:
+                print(f"  ⚠️  Skipping duplicate: {left_table} → {right_table} (already have {existing[0][0]} → {existing[0][1]})")
+                continue
+
+        deduplicated_pairs[(left_table, right_table)] = column_pairs
+
+    print(f"✅ After deduplication: {len(deduplicated_pairs)} unique relationship pairs\n")
+    pairs = deduplicated_pairs
+
     # Build relationships with inferred cardinality
     for (left_table, right_table), column_pairs in pairs.items():
         if _timed_out():
@@ -2909,21 +3902,121 @@ def _infer_relationships(
         ):
             status_dict["limited_by_max_relationships"] = True
             break
+
+        column_pairs = list(column_pairs)
+
+        # Universal Fix: Validate composite key consistency (works for ANY schema)
+        if len(column_pairs) > 1:
+            if not _validate_composite_key_consistency(column_pairs):
+                # This is a logical error that applies to all schemas
+                print(f"🚫 Skipping logically inconsistent composite key {left_table} → {right_table}: {column_pairs}")
+                continue  # Skip invalid composite keys
+
+        # P1 Fix: Filter excessive composite key relationships
+        if len(column_pairs) > 2:
+            # Be very restrictive with composite keys having more than 2 columns
+            # Only allow if confidence is very high
+            left_meta = metadata[left_table]
+            right_meta = metadata[right_table]
+
+            # Check if this forms a strong composite key pattern
+            left_analysis = _analyze_composite_key_patterns(
+                left_meta, column_pairs, column_index=0
+            )
+            right_analysis = _analyze_composite_key_patterns(
+                right_meta, column_pairs, column_index=1
+            )
+
+            # Only allow multi-column relationships if they form clear composite PKs
+            if not (left_analysis["is_composite_pk"] or right_analysis["is_composite_pk"]):
+                continue  # Skip this relationship
+        elif len(column_pairs) > 1:
+            # For 2-column composite keys, apply moderate filtering
+            # Ensure at least one side has meaningful PK coverage
+            left_meta = metadata[left_table]
+            right_meta = metadata[right_table]
+
+            left_analysis = _analyze_composite_key_patterns(
+                left_meta, column_pairs, column_index=0
+            )
+            right_analysis = _analyze_composite_key_patterns(
+                right_meta, column_pairs, column_index=1
+            )
+
+            # Require some PK involvement for composite relationships (relaxed threshold)
+            if (left_analysis["pk_coverage_ratio"] < 0.3 and
+                right_analysis["pk_coverage_ratio"] < 0.3):
+                continue  # Skip this relationship
+
         # Infer cardinality based on available metadata
         left_meta = metadata[left_table]
         right_meta = metadata[right_table]
 
-        # Determine if tables have primary keys in the relationship
-        left_has_pk = any(
-            col_name in [pair[0] for pair in column_pairs]
-            for pk_list in left_meta["pk_candidates"].values()
-            for col_name in pk_list
+        left_pk_names = _pk_name_set(left_meta)
+        right_pk_names = _pk_name_set(right_meta)
+
+        left_pk_hits = sum(1 for left_col, _ in column_pairs if left_col.upper() in left_pk_names)
+        right_pk_hits = sum(1 for _, right_col in column_pairs if right_col.upper() in right_pk_names)
+
+        # Determine orientation based on PK coverage and naming conventions
+        should_swap = False
+        if left_pk_hits > right_pk_hits:
+            should_swap = True
+        elif left_pk_hits == right_pk_hits:
+            left_convention = _identify_naming_convention(left_table, domain_patterns_cache)
+            right_convention = _identify_naming_convention(right_table, domain_patterns_cache)
+            if left_convention == "dimension" and right_convention in {"fact", "bridge"}:
+                should_swap = True
+
+        if should_swap:
+            column_pairs = [(right_col, left_col) for left_col, right_col in column_pairs]
+            left_table, right_table = right_table, left_table
+            left_meta, right_meta = right_meta, left_meta
+            left_pk_names, right_pk_names = right_pk_names, left_pk_names
+            left_pk_hits, right_pk_hits = right_pk_hits, left_pk_hits
+
+        normalized_signature = tuple(
+            sorted((left_col.upper(), right_col.upper()) for left_col, right_col in column_pairs)
         )
-        right_has_pk = any(
-            col_name in [pair[1] for pair in column_pairs]
-            for pk_list in right_meta["pk_candidates"].values()
-            for col_name in pk_list
-        )
+        signature = (left_table, right_table, normalized_signature)
+        if signature in emitted_relationship_signatures:
+            continue
+        emitted_relationship_signatures.add(signature)
+
+        # Determine if relationship columns form complete primary keys
+        # CRITICAL: Only consider it a PK if the relationship columns form a COMPLETE primary key
+        # Not just part of a composite key
+        def _forms_complete_pk(table_meta, column_names_in_relationship):
+            """Check if the relationship columns form a complete PK (not just part of composite key)"""
+            pk_candidates = table_meta.get("pk_candidates", {})
+            if not pk_candidates:
+                return False
+
+            # Get all PK column names (normalized)
+            all_pk_cols = set()
+            for pk_list in pk_candidates.values():
+                all_pk_cols.update(col.upper() for col in pk_list)
+
+            # Get relationship column names (normalized)
+            rel_cols = set(col.upper() for col in column_names_in_relationship)
+
+            # DEBUG: Log PK matching details
+            is_complete = rel_cols == all_pk_cols
+            if len(all_pk_cols) > 0:
+                table_name = table_meta.get("fqn", "unknown")
+                print(f"    DEBUG _forms_complete_pk for table {table_name}:")
+                print(f"      all_pk_cols: {sorted(all_pk_cols)}")
+                print(f"      rel_cols: {sorted(rel_cols)}")
+                print(f"      is_complete: {is_complete}")
+
+            # Only return True if relationship columns match ALL PK columns
+            return is_complete
+
+        left_cols_in_rel = [pair[0] for pair in column_pairs]
+        right_cols_in_rel = [pair[1] for pair in column_pairs]
+
+        left_has_pk = _forms_complete_pk(left_meta, left_cols_in_rel)
+        right_has_pk = _forms_complete_pk(right_meta, right_cols_in_rel)
 
         # Enhanced: Get sample values for all columns in the relationship (for composite key analysis)
         left_values_all = []
@@ -2970,13 +4063,54 @@ def _infer_relationships(
             )
         else:
             # Fallback to single-column analysis with adaptive thresholds
+            # Extract first column names for pattern analysis
+            first_left_col = column_pairs[0][0] if column_pairs else ""
+            first_right_col = column_pairs[0][1] if column_pairs else ""
+
             left_card, right_card = _infer_cardinality(
                 left_values,
                 right_values,
                 left_has_pk,
                 right_has_pk,
+                left_table=left_table,
+                right_table=right_table,
+                left_column=first_left_col,
+                right_column=first_right_col,
                 adaptive_thresholds=global_adaptive_thresholds,
             )
+
+        # CRITICAL FIX: Force correct cardinality based on PK metadata
+        # Override statistical inference if we have clear PK metadata
+
+        # DEBUG: Always log PK status and initial cardinality
+        print(f"  🔍 Cardinality check for {left_table} → {right_table}:")
+        print(f"     Initial: {left_card}:{right_card}")
+        print(f"     PK status: left_has_pk={left_has_pk}, right_has_pk={right_has_pk}")
+
+        if right_has_pk and not left_has_pk:
+            # This is definitely FK -> PK (many-to-one)
+            if left_card != "*" or right_card != "1":
+                print(f"  🔧 Correcting cardinality for {left_table} → {right_table}: {left_card}:{right_card} -> *:1 (FK->PK)")
+                left_card, right_card = ("*", "1")
+            else:
+                print(f"  ✅ Cardinality already correct: {left_card}:{right_card} (FK->PK)")
+        elif left_has_pk and not right_has_pk:
+            # This is definitely PK -> FK (one-to-many)
+            if left_card != "1" or right_card != "*":
+                print(f"  🔧 Correcting cardinality for {left_table} → {right_table}: {left_card}:{right_card} -> 1:* (PK->FK)")
+                left_card, right_card = ("1", "*")
+            else:
+                print(f"  ✅ Cardinality already correct: {left_card}:{right_card} (PK->FK)")
+        elif not right_has_pk and not left_has_pk:
+            # Neither side is PK, default to many-to-one (safest)
+            if left_card == "1" and right_card == "1":
+                print(f"  🔧 Correcting cardinality for {left_table} → {right_table}: 1:1 -> *:1 (no PK, use safe default)")
+                left_card, right_card = ("*", "1")
+            else:
+                print(f"  ℹ️  No correction needed: {left_card}:{right_card} (no PK on either side)")
+        else:
+            # Both have PK - this might be a composite key situation
+            print(f"  ⚠️  Both sides have PK - keeping original: {left_card}:{right_card}")
 
         # Determine if SQL null probe should be executed for stricter inference
         strict_fk_detected = False
@@ -3142,7 +4276,7 @@ def _infer_relationships(
         for left_column, right_column in column_pairs:
             relationship.relationship_columns.append(
                 semantic_model_pb2.RelationKey(
-                    left_column=left_column, right_column=right_column
+                    left_column=left_column.upper(), right_column=right_column.upper()
                 )
             )
         relationships.append(relationship)
