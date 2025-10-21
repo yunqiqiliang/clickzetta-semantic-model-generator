@@ -3,11 +3,13 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 import pandas as pd
+import pytest
 
 from semantic_model_generator.relationships.discovery import (
     discover_relationships_from_schema,
     discover_relationships_from_table_definitions,
 )
+from semantic_model_generator.generate_model import _analyze_composite_key_patterns
 
 
 class _FakeResult:
@@ -407,3 +409,115 @@ def test_suffix_match_without_semantic_prefix_is_ignored() -> None:
 
     pairs = {(rel.left_table, rel.right_table) for rel in result.relationships}
     assert ("PRODUCTS", "ORDERS") not in pairs
+
+
+def test_dictionary_iteration_order_for_nation_table() -> None:
+    """
+    Test to demonstrate dictionary iteration order issue with NATION table columns.
+
+    This test shows that when we have columns like n_regionkey and n_nationkey,
+    the iteration order can cause n_regionkey to be checked before n_nationkey.
+    If the algorithm uses 'continue' after finding the first valid match,
+    it may select n_regionkey instead of the better match n_nationkey.
+    """
+    # Simulate NATION table with columns in a specific order
+    nation_columns = {
+        "n_nationkey": {"type": "NUMBER", "names": ["N_NATIONKEY"]},
+        "n_name": {"type": "STRING", "names": ["N_NAME"]},
+        "n_regionkey": {"type": "NUMBER", "names": ["N_REGIONKEY"]},
+        "n_comment": {"type": "STRING", "names": ["N_COMMENT"]},
+    }
+
+    # Test iteration order
+    iteration_order = list(nation_columns.keys())
+    print(f"Dictionary iteration order: {iteration_order}")
+
+    # In Python 3.7+, dictionaries maintain insertion order
+    # So the iteration order should be: n_nationkey, n_name, n_regionkey, n_comment
+    assert iteration_order == ["n_nationkey", "n_name", "n_regionkey", "n_comment"]
+
+
+def test_relationship_discovery_selects_best_match_not_first_match() -> None:
+    """
+    Test that relationship discovery selects the best matching column,
+    not just the first valid column it encounters during iteration.
+
+    CUSTOMER.c_nationkey should match NATION.n_nationkey (exact match),
+    not NATION.n_regionkey (weaker match that might appear earlier in iteration).
+    """
+    payload = [
+        {
+            "table_name": "customer",
+            "columns": [
+                {"name": "c_custkey", "type": "NUMBER", "is_primary_key": True},
+                {"name": "c_nationkey", "type": "NUMBER"},
+            ],
+        },
+        {
+            "table_name": "nation",
+            "columns": [
+                # Deliberately order n_regionkey before n_nationkey to test iteration order
+                {"name": "n_regionkey", "type": "NUMBER"},
+                {"name": "n_nationkey", "type": "NUMBER", "is_primary_key": True},
+                {"name": "n_name", "type": "STRING"},
+            ],
+        },
+    ]
+
+    result = discover_relationships_from_table_definitions(
+        payload,
+        min_confidence=0.6,
+        max_relationships=10,
+    )
+
+    # Find the relationship from CUSTOMER to NATION
+    customer_nation_rels = [
+        rel for rel in result.relationships
+        if rel.left_table == "CUSTOMER" and rel.right_table == "NATION"
+    ]
+
+    assert len(customer_nation_rels) >= 1, "Expected at least one CUSTOMER -> NATION relationship"
+
+    # The relationship should use n_nationkey (best match), not n_regionkey
+    for rel in customer_nation_rels:
+        # relationship_columns is a list of RelationKey objects with left_column and right_column
+        right_cols = [rc.right_column for rc in rel.relationship_columns]
+        assert "N_NATIONKEY" in right_cols, (
+            f"Expected relationship to use N_NATIONKEY, but got {right_cols}. "
+            f"This indicates the algorithm selected the first valid match (n_regionkey) "
+            f"instead of the best match (n_nationkey)."
+        )
+
+
+def test_composite_pk_analysis_uses_correct_column_side() -> None:
+    """
+    Regression: ensure composite key analysis counts PK coverage on the correct table side.
+
+    Before the fix, the right-side table always inspected column_pairs[0], producing zero
+    coverage and causing legitimate composite relationships to be dropped.
+    """
+    table_meta = {
+        "columns": {
+            "order_id": {"names": ["ORDER_ID"], "base_type": "NUMBER"},
+            "line_id": {"names": ["LINE_ID"], "base_type": "NUMBER"},
+        },
+        "pk_candidates": {
+            "order_id": ["ORDER_ID"],
+            "line_id": ["LINE_ID"],
+        },
+    }
+    column_pairs = [
+        ("L_ORDER_ID", "ORDER_ID"),
+        ("L_LINE_ID", "LINE_ID"),
+    ]
+
+    analysis = _analyze_composite_key_patterns(
+        table_meta,
+        column_pairs,
+        column_index=1,
+    )
+
+    # Both PK columns should be detected, yielding full coverage.
+    assert analysis["pk_column_count"] == 2
+    assert analysis["pk_coverage_ratio"] == pytest.approx(1.0)
+    assert analysis["is_composite_pk"]
