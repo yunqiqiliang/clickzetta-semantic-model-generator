@@ -2,6 +2,29 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.44] - 2025-10-21
+
+### Critical Bug Fix
+
+- **Fixed overly aggressive sample data PK inference**: Added strict filtering to prevent non-key columns from being incorrectly identified as primary keys
+  - Problem: v1.0.43 marked ALL high-uniqueness columns as PKs (comment fields, balance fields, quantity fields)
+  - Impact: TPC-H only discovered 7/10 relationships instead of 10
+  - Solution: New `_could_be_identifier_column()` function with strict rules:
+    - Column name MUST contain key-like tokens (id, key, num, code, no)
+    - Data type MUST be appropriate (NUMBER, STRING, INT - not DECIMAL, DATE, TEXT)
+    - Explicitly exclude non-key patterns (name, comment, address, phone, balance, amount, price, etc.)
+  - Result: TPC-H now correctly discovers 10/10 relationships ✓
+
+### Validation
+
+- All tests passing: 19/22 (86.4%)
+- TPC-H benchmark: 10/10 relationships discovered
+- Sample data inference: still working correctly for poor column names
+
+### Recommendation
+
+**All users of v1.0.43 should upgrade immediately** - the overly aggressive PK inference could cause incorrect relationship discovery in production schemas.
+
 ## [1.0.43] - 2025-10-21
 
 ### Major Features
