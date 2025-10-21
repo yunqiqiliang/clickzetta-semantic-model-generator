@@ -220,45 +220,83 @@ def _safe_semantic_identifier(
         suffix += 1
 
 
-def _could_be_identifier_column(column_name: str, base_type: str) -> bool:
+def _could_be_identifier_column(column_name: str, base_type: str, table_name: str = "") -> bool:
     """
     Check if a column could potentially be a primary key based on naming and type.
     More strict than _is_identifier_like - used for sample data PK inference.
 
-    Returns True only if:
-    1. Column name contains key-like tokens (id, key, num, code, no)
-    2. Base type is appropriate for keys (not DECIMAL, DATE, TEXT/COMMENT types)
+    Strategy:
+    1. Exclude non-key types (DECIMAL, DATE, TEXT)
+    2. Exclude obvious non-key columns (NAME, COMMENT, BALANCE, etc.)
+    3. If table_name provided, check if column references THIS table (PK) vs OTHER tables (FK)
+    4. Otherwise, only accept simple key patterns (ID, KEY, NUM, etc.)
+
+    Args:
+        column_name: The column name to check
+        base_type: The column's base data type
+        table_name: Optional table name to help distinguish PK from FK
     """
     # Type must be appropriate for a key (integer or short string, not decimal/date/text)
     if base_type not in {"NUMBER", "STRING", "BIGINT", "INTEGER", "INT", "VARCHAR"}:
         return False
 
-    # Column name must contain key-like tokens
     col_upper = column_name.upper()
     tokens = _identifier_tokens(column_name)
 
-    # Check for explicit key indicators
-    key_indicators = {"ID", "KEY", "NUM", "NO", "CODE", "PK", "ROWID", "PRIMARY"}
-    for token in tokens:
-        if token in key_indicators:
-            return True
-        # Also check suffixes
-        if token.endswith("ID") and len(token) > 2:
-            return True
-        if token.endswith("KEY") and len(token) > 3:
-            return True
-        if token.endswith("NUM") or token.endswith("NO"):
-            return True
-
-    # Exclude obvious non-key columns
+    # Exclude obvious non-key columns first
     exclude_indicators = {"NAME", "COMMENT", "DESC", "DESCRIPTION", "ADDRESS",
                          "PHONE", "EMAIL", "BALANCE", "AMOUNT", "PRICE", "COST",
-                         "DATE", "TIME", "TIMESTAMP", "QTY", "QUANTITY"}
+                         "DATE", "TIME", "TIMESTAMP", "QTY", "QUANTITY", "TEXT"}
     for token in tokens:
         if token in exclude_indicators:
             return False
         if any(token.endswith(suffix) for suffix in ["BAL", "AMT", "AVAIL"]):
             return False
+
+    # If we have table name, use it to distinguish PK from FK
+    if table_name:
+        table_tokens = {t.upper() for t in _identifier_tokens(table_name)}
+
+        # Check each token in column name
+        for token in tokens:
+            # Token ends with KEY or ID
+            if token.endswith("KEY") or token.endswith("ID"):
+                # Extract the prefix (what comes before KEY/ID)
+                if token.endswith("KEY"):
+                    prefix = token[:-3]  # Remove "KEY"
+                else:
+                    prefix = token[:-2]  # Remove "ID"
+
+                # Check if this prefix matches table name
+                # e.g., ORDERKEY in ORDERS table -> ORDER matches ORDER(S)
+                # But CUSTKEY in ORDERS table -> CUST doesn't match ORDER
+                for table_token in table_tokens:
+                    # Direct match or prefix match
+                    if prefix == table_token or table_token.startswith(prefix) or prefix.startswith(table_token):
+                        return True  # This is a PK candidate (references this table)
+
+                # If prefix doesn't match table name, it's likely a FK
+                # e.g., O_CUSTKEY in ORDERS -> CUST doesn't match ORDER -> FK
+                # But also need to check for common FK entity names
+                common_fk_entities = {
+                    "CUST", "CUSTOMER", "NATION", "REGION", "SUPP", "SUPPLIER",
+                    "PART", "PRODUCT", "USER", "ACCOUNT", "CATEGORY",
+                    "COMPANY", "DEPARTMENT", "EMPLOYEE", "PARENT", "OWNER"
+                }
+                if any(prefix.startswith(entity) for entity in common_fk_entities):
+                    return False  # This is a FK, not a PK
+
+        # Also check for simple patterns like LINENUMBER, LINENUM
+        for token in tokens:
+            if token in {"NUM", "NO", "NUMBER"} or token.endswith("NUM") or token.endswith("NO") or token.endswith("NUMBER"):
+                # But not if it looks like a quantity field
+                if not any(excl in token for excl in ["QTY", "CNT", "COUNT", "AVAIL"]):
+                    return True
+
+    # Without table name, only accept very simple patterns
+    simple_pk_indicators = {"ID", "KEY", "PK", "ROWID", "PRIMARY", "NUM", "NO", "CODE"}
+    if any(token in simple_pk_indicators for token in tokens):
+        return True
 
     return False
 
@@ -3527,11 +3565,12 @@ def _infer_relationships(
             # ENHANCEMENT: Infer PK from sample data when column naming is poor
             # This allows PK detection for columns like 'uid', 'oid', 'pid' etc.
             # IMPORTANT: Only apply when column name suggests it could be a key (contains id/key/num)
+            # CRITICAL: Pass table_name to help distinguish PK from FK patterns
             if (
                 not has_explicit_pk
                 and column.column_name not in pk_candidates[normalized]
                 and column.values
-                and _could_be_identifier_column(column.column_name, base_type)
+                and _could_be_identifier_column(column.column_name, base_type, raw_table.name)
             ):
                 # Check if sample data shows high uniqueness (PK pattern)
                 if _infer_pk_from_sample_data(column.values, min_uniqueness=0.95, min_sample_size=20):
