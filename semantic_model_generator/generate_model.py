@@ -326,12 +326,14 @@ def _should_exclude_from_relationship_matching(column_name: str, base_type: str 
     Check if a column should be excluded from FK-PK relationship matching.
 
     Excludes columns that are clearly not suitable for relationships:
-    - Timestamp fields (created_at, updated_at, deleted_at, etc.)
+    - Timestamp fields (created_at, updated_at, deleted_at, _created_at, etc.)
     - Content/text fields (description, content, comment, notes, etc.)
     - Measurement fields (amount, price, quantity without ID suffix)
+    - System fields with underscore prefix (_created_at, _updated_at, etc.)
 
     This prevents false positive matches like:
     - comments.created_at = posts.created_at
+    - comments._created_at = posts._created_at (system field)
     - comments.content = posts.content
 
     Returns True if column should be EXCLUDED (not used for matching)
@@ -341,6 +343,46 @@ def _should_exclude_from_relationship_matching(column_name: str, base_type: str 
 
     col_upper = column_name.upper()
     tokens = _identifier_tokens(column_name)
+
+    # Check for underscore-prefixed system fields
+    # These are typically system-managed fields, not business keys
+    # Examples: _created_at, _updated_at, _version, _deleted_at
+    # BUT: _id, _key might be valid business keys in some schemas (e.g., MongoDB style)
+    if col_upper.startswith("_"):
+        # Strip the leading underscore and check if it's a system field pattern
+        stripped = col_upper[1:]
+
+        # Special case: bare _ID or _KEY might be business keys, don't exclude
+        # But _CREATED_AT, _UPDATED_AT, etc. are clearly system fields
+        if stripped in {"ID", "KEY", "NUM", "CODE", "NO"}:
+            # These might be business keys, don't exclude
+            return False
+
+        # Common system field patterns with underscore prefix
+        system_patterns = {
+            "CREATED_AT", "UPDATED_AT", "DELETED_AT", "MODIFIED_AT",
+            "CREATED_TIME", "UPDATED_TIME", "DELETED_TIME", "MODIFIED_TIME",
+            "CREATE_TIME", "UPDATE_TIME", "DELETE_TIME", "MODIFY_TIME",
+            "CREATED_DATE", "UPDATED_DATE", "DELETED_DATE", "MODIFIED_DATE",
+            "CREATE_DATE", "UPDATE_DATE", "DELETE_DATE", "MODIFY_DATE",
+            "CREATEDAT", "UPDATEDAT", "DELETEDAT", "MODIFIEDAT",
+            "TIMESTAMP", "DATETIME", "DATE_TIME",
+            "VERSION", "REVISION", "REV",
+            "ROWVERSION", "ROW_VERSION",
+            "ETAG", "E_TAG",
+            "CREATED_BY", "UPDATED_BY", "DELETED_BY", "MODIFIED_BY",
+            "CREATOR", "UPDATER", "MODIFIER",
+            "DESCRIPTION", "CONTENT", "COMMENT", "NOTE", "TEXT",  # System content fields
+            "AMOUNT", "PRICE", "COST", "QUANTITY", "BALANCE"  # System measurement fields
+        }
+
+        if stripped in system_patterns:
+            return True
+
+        # Also check if it ends with system patterns
+        for pattern in ["_AT", "_TIME", "_DATE", "_BY", "_VERSION"]:
+            if stripped.endswith(pattern):
+                return True
 
     # Exclude timestamp/date columns
     timestamp_patterns = {
