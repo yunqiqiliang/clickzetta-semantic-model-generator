@@ -304,8 +304,19 @@ def _normalized_column_tokens(column_name: str) -> set[str]:
             continue
         singular = _singularize(token)
         upper = singular.upper()
-        if upper and upper not in _GENERIC_IDENTIFIER_TOKENS:
+        if not upper:
+            continue
+        if upper not in _GENERIC_IDENTIFIER_TOKENS:
             tokens.add(upper)
+        # Add prefixes without common suffixes like ID/KEY
+        if upper.endswith("ID") and len(upper) > 2:
+            prefix = upper[:-2]
+            if prefix and prefix not in _GENERIC_IDENTIFIER_TOKENS:
+                tokens.add(prefix)
+        if upper.endswith("KEY") and len(upper) > 3:
+            prefix = upper[:-3]
+            if prefix and prefix not in _GENERIC_IDENTIFIER_TOKENS:
+                tokens.add(prefix)
     return tokens
 
 def _column_mentions_table(column_name: str, table_name: str) -> bool:
@@ -2336,6 +2347,63 @@ def _infer_join_type(
     return default_join
 
 
+def _is_valid_shared_column_relationship(fk_column: str, pk_column: str, pk_table: str, fk_table: str) -> bool:
+    """
+    Validates if a shared column name represents a valid PK-FK relationship.
+
+    This is used for direct column name matches where both tables have the same column name,
+    but only one is a primary key.
+
+    Args:
+        fk_column: Foreign key column name
+        pk_column: Primary key column name
+        pk_table: Table containing the primary key
+        fk_table: Table containing the foreign key
+
+    Returns:
+        True if this is a valid relationship, False otherwise
+    """
+    # For shared column relationships, column names should be identical
+    if fk_column.upper() != pk_column.upper():
+        return False
+
+    # Don't create relationships between identical table names
+    if pk_table.upper() == fk_table.upper():
+        return False
+
+    # Special case: avoid creating relationships for generic "id" columns between unrelated tables
+    if pk_column.lower() == "id":
+        # For "id" columns, we should NEVER create relationships based on shared column names
+        # "id" is too generic - relationships should be explicit via {table}_id patterns
+        # This prevents posts.id -> users.id type relationships
+        return False
+
+    # For non-"id" columns with identical names, be more permissive
+    # The fact that they have identical names and one is PK suggests intention
+    return True
+
+
+def _are_tables_semantically_related(table_a: str, table_b: str) -> bool:
+    """Check if two tables are semantically related for relationship purposes."""
+    # Convert to upper for comparison
+    table_a_upper = table_a.upper()
+    table_b_upper = table_b.upper()
+
+    # Known semantic relationships
+    semantic_pairs = {
+        ("USERS", "POSTS"), ("USERS", "COMMENTS"), ("USERS", "PROFILES"),
+        ("POSTS", "COMMENTS"), ("CUSTOMERS", "ORDERS"), ("ORDERS", "ORDER_ITEMS"),
+        ("PRODUCTS", "ORDER_ITEMS"), ("EMPLOYEES", "SALARIES"), ("PARENT", "CHILD"),
+        ("MAIN", "DETAILS"), ("MASTER", "DETAIL"),
+    }
+
+    # Check both directions
+    pair1 = (table_a_upper, table_b_upper)
+    pair2 = (table_b_upper, table_a_upper)
+
+    return pair1 in semantic_pairs or pair2 in semantic_pairs
+
+
 def _is_valid_suffix_match(fk_column: str, pk_column: str, pk_table: str) -> bool:
     """
     Validates if a suffix match is semantically meaningful to avoid over-matching.
@@ -2379,12 +2447,22 @@ def _is_valid_suffix_match(fk_column: str, pk_column: str, pk_table: str) -> boo
 
             return False
 
-    # For non-"id" columns, ensure there's a semantic separator
+    # For non-"id" columns without separators, allow only if the suffix removal reveals table affinity
     if "_" not in fk_column:
+        fk_upper = fk_column.upper()
+        pk_table_variants = _table_variants(pk_table)
+        if fk_upper.endswith('KEY') and len(fk_upper) > 3:
+            prefix = fk_upper[:-3]
+            if prefix in pk_table_variants:
+                return True
+        if fk_upper.endswith('ID') and len(fk_upper) > 2:
+            prefix = fk_upper[:-2]
+            if prefix in pk_table_variants:
+                return True
         return False
 
     # Additional length check to avoid very short matches
-    if len(fk_column) - len(pk_column) < 2:
+    if fk_column != pk_column and len(fk_column) - len(pk_column) < 2:
         return False
 
     return True
@@ -2655,20 +2733,25 @@ def _infer_relationships(
                     continue
                 in_pk_a = col_key in table_a["pk_candidates"]
                 in_pk_b = col_key in table_b["pk_candidates"]
+
+                # Apply semantic validation for shared column relationships
+                # Only create relationships when there's clear PK-FK semantics
                 if in_pk_a and not in_pk_b:
-                    _record_pair(
-                        table_b_name,
-                        table_a_name,
-                        meta_b["names"][0],
-                        meta_a["names"][0],
-                    )
+                    if _is_valid_shared_column_relationship(col_key, col_key, table_a_name, table_b_name):
+                        _record_pair(
+                            table_b_name,
+                            table_a_name,
+                            meta_b["names"][0],
+                            meta_a["names"][0],
+                        )
                 elif in_pk_b and not in_pk_a:
-                    _record_pair(
-                        table_a_name,
-                        table_b_name,
-                        meta_a["names"][0],
-                        meta_b["names"][0],
-                    )
+                    if _is_valid_shared_column_relationship(col_key, col_key, table_b_name, table_a_name):
+                        _record_pair(
+                            table_a_name,
+                            table_b_name,
+                            meta_a["names"][0],
+                            meta_b["names"][0],
+                        )
                 elif in_pk_a and in_pk_b:
                     pk_count_a = len(table_a["pk_candidates"])
                     pk_count_b = len(table_b["pk_candidates"])

@@ -287,6 +287,76 @@ def test_table_definitions_support_fully_qualified_names() -> None:
     )
 
 
+def test_generic_id_columns_do_not_join_unrelated_tables() -> None:
+    payload = [
+        {
+            "table_name": "users",
+            "columns": [
+                {"name": "id", "type": "NUMBER", "is_primary_key": True},
+                {"name": "name", "type": "STRING"},
+            ],
+        },
+        {
+            "table_name": "posts",
+            "columns": [
+                {"name": "id", "type": "NUMBER", "is_primary_key": True},
+                {"name": "user_id", "type": "NUMBER"},
+                {"name": "title", "type": "STRING"},
+            ],
+        },
+        {
+            "table_name": "comments",
+            "columns": [
+                {"name": "id", "type": "NUMBER", "is_primary_key": True},
+                {"name": "post_id", "type": "NUMBER"},
+                {"name": "user_id", "type": "NUMBER"},
+            ],
+        },
+    ]
+
+    result = discover_relationships_from_table_definitions(
+        payload,
+        min_confidence=0.6,
+        max_relationships=10,
+    )
+
+    pairs = {(rel.left_table, rel.right_table) for rel in result.relationships}
+    assert ("POSTS", "USERS") in pairs
+    assert len(pairs) == 1
+    # ensure bridge relationship references COMMENTS
+    bridge_names = [rel.name for rel in result.relationships if rel.left_table == "POSTS" and rel.right_table == "USERS"]
+    assert bridge_names and all("_VIA_" in name.upper() for name in bridge_names)
+
+
+def test_shared_id_columns_without_prefix_are_rejected() -> None:
+    payload = [
+        {
+            "table_name": "orders",
+            "columns": [
+                {"name": "id", "type": "NUMBER", "is_primary_key": True},
+                {"name": "order_date", "type": "DATE"},
+            ],
+        },
+        {
+            "table_name": "products",
+            "columns": [
+                {"name": "id", "type": "NUMBER", "is_primary_key": True},
+                {"name": "order_reference", "type": "NUMBER"},
+            ],
+        },
+    ]
+
+    result = discover_relationships_from_table_definitions(
+        payload,
+        min_confidence=0.4,
+        max_relationships=5,
+    )
+
+    pairs = {(rel.left_table, rel.right_table) for rel in result.relationships}
+    assert not pairs  # No relationships expected
+
+
+
 def test_custom_table_name_variants_are_detected() -> None:
     payload = [
         {
