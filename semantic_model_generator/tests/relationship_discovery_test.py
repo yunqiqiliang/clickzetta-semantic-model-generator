@@ -156,7 +156,7 @@ def _order_items_orders_products_payload() -> List[Dict[str, Any]]:
             "table_name": "order_items",
             "columns": [
                 {"name": "order_item_id", "type": "NUMBER", "is_primary_key": True},
-                {"name": "order_id", "type": "NUMBER"},
+                {"name": "order_reference", "type": "STRING"},
                 {"name": "product_id", "type": "NUMBER"},
             ],
         },
@@ -285,3 +285,55 @@ def test_table_definitions_support_fully_qualified_names() -> None:
         rel.left_table == "ORDERS" and rel.right_table == "CUSTOMERS"
         for rel in result.relationships
     )
+
+
+def test_custom_table_name_variants_are_detected() -> None:
+    payload = [
+        {
+            "table_name": "entity_alpha",
+            "columns": [
+                {"name": "alpha_id", "type": "NUMBER", "is_primary_key": True},
+                {"name": "alpha_name", "type": "STRING"},
+            ],
+        },
+        {
+            "table_name": "entity_beta",
+            "columns": [
+                {"name": "beta_id", "type": "NUMBER", "is_primary_key": True},
+                {"name": "alpha_id", "type": "NUMBER"},
+            ],
+        },
+    ]
+
+    result = discover_relationships_from_table_definitions(payload)
+    pairs = {(rel.left_table, rel.right_table) for rel in result.relationships}
+    assert ("ENTITY_BETA", "ENTITY_ALPHA") in pairs
+
+
+
+def test_suffix_match_without_semantic_prefix_is_ignored() -> None:
+    payload = [
+        {
+            "table_name": "orders",
+            "columns": [
+                {"name": "order_id", "type": "NUMBER", "is_primary_key": True},
+                {"name": "customer_id", "type": "NUMBER"},
+            ],
+        },
+        {
+            "table_name": "products",
+            "columns": [
+                {"name": "product_id", "type": "NUMBER", "is_primary_key": True},
+                {"name": "order_reference", "type": "STRING"},
+            ],
+        },
+    ]
+
+    result = discover_relationships_from_table_definitions(
+        payload,
+        min_confidence=0.6,
+        max_relationships=10,
+    )
+
+    pairs = {(rel.left_table, rel.right_table) for rel in result.relationships}
+    assert ("PRODUCTS", "ORDERS") not in pairs

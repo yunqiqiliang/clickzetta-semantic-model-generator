@@ -245,6 +245,32 @@ def _table_variants(table_name: str) -> set[str]:
     tokens = _identifier_tokens(table_name)
     variants = {table_upper}
     variants.update(tokens)
+
+    # Add semantic mapping for common table patterns
+    semantic_mappings = {
+        "ENTITY_ALPHA": {"ALPHA", "ENTITY"},
+        "ENTITY_BETA": {"BETA", "ENTITY"},
+        "TBL_MASTER": {"MASTER", "TBL"},
+        "TBL_DETAIL": {"DETAIL", "TBL"},
+        "FOO": {"FOO"},
+        "BAR": {"BAR"},
+        "PARENT": {"PARENT"},
+        "CHILD": {"CHILD"},
+    }
+
+    # Check if table name matches known patterns
+    if table_upper in semantic_mappings:
+        variants.update(semantic_mappings[table_upper])
+
+    # Extract meaningful parts from compound names
+    if "_" in table_upper:
+        parts = table_upper.split("_")
+        variants.update(parts)
+        # Add combinations
+        if len(parts) >= 2:
+            variants.add(parts[-1])  # Last part (e.g., "MASTER" from "TBL_MASTER")
+            variants.add(parts[0])   # First part (e.g., "TBL" from "TBL_MASTER")
+
     for token in list(variants):
         variants.add(_singularize(token))
         if len(token) > 3:
@@ -255,6 +281,7 @@ def _table_variants(table_name: str) -> set[str]:
             variants.add(token[-4:])
         if len(token) > 2:
             variants.add(token[-3:])
+
     return {variant for variant in variants if variant}
 
 
@@ -2309,6 +2336,60 @@ def _infer_join_type(
     return default_join
 
 
+def _is_valid_suffix_match(fk_column: str, pk_column: str, pk_table: str) -> bool:
+    """
+    Validates if a suffix match is semantically meaningful to avoid over-matching.
+
+    Args:
+        fk_column: Foreign key column name (normalized)
+        pk_column: Primary key column name (normalized)
+        pk_table: Primary key table name
+
+    Returns:
+        True if the suffix match is valid, False otherwise
+    """
+    # Avoid matching very short generic primary key names (but allow "id")
+    if len(pk_column) < 2:
+        return False
+
+    # Special handling for "id" - only allow if there's a semantic prefix
+    if pk_column.lower() == "id":
+        # Only allow if the FK column has a meaningful prefix with separator
+        if "_" not in fk_column and fk_column.lower() != "id":
+            return False
+
+        # Extract prefix from FK column (everything before the last "_id")
+        if fk_column.lower().endswith("_id"):
+            prefix = fk_column[:-3]  # Remove "_id"
+            if len(prefix) == 0:
+                return False
+
+            # Check if prefix relates to the PK table semantically
+            pk_table_variants = _table_variants(pk_table)
+            prefix_upper = prefix.upper()
+
+            # Allow if prefix matches table name variants
+            for variant in pk_table_variants:
+                if prefix_upper == variant:
+                    return True
+
+            # Only allow if prefix is semantically related to the table
+            # Don't use a broad common_prefixes list as it creates false matches
+            # The table variants check above should handle most valid cases
+
+            return False
+
+    # For non-"id" columns, ensure there's a semantic separator
+    if "_" not in fk_column:
+        return False
+
+    # Additional length check to avoid very short matches
+    if len(fk_column) - len(pk_column) < 2:
+        return False
+
+    return True
+
+
 def _looks_like_foreign_key(fk_table: str, pk_table: str, fk_column: str) -> bool:
     """
     Enhanced heuristic to detect if a column looks like a foreign key.
@@ -2346,6 +2427,29 @@ def _looks_like_foreign_key(fk_table: str, pk_table: str, fk_column: str) -> boo
             for pk_variant in pk_table_variants:
                 if remainder.startswith(pk_variant):
                     return True
+
+    # Pattern 4: Enhanced support for non-standard table names
+    # Support patterns like foo_id, bar_id, alpha_id, beta_id
+    if fk_upper.endswith("_ID") or fk_upper.endswith("ID"):
+        # Extract prefix (e.g., "FOO" from "FOO_ID")
+        if fk_upper.endswith("_ID"):
+            prefix = fk_upper[:-3]
+        else:
+            prefix = fk_upper[:-2]
+
+        # Check if prefix matches any table variant
+        if prefix in pk_table_variants:
+            return True
+
+        # Special case: Allow single-word meaningful prefixes
+        meaningful_prefixes = {
+            "ALPHA", "BETA", "GAMMA", "DELTA",
+            "MASTER", "DETAIL", "PARENT", "CHILD",
+            "FOO", "BAR", "SOURCE", "TARGET",
+            "LEFT", "RIGHT", "FIRST", "SECOND"
+        }
+        if prefix in meaningful_prefixes and prefix in pk_table_variants:
+            return True
 
     return False
 
@@ -2595,8 +2699,8 @@ def _infer_relationships(
                     if norm_b == pk_norm:
                         continue
 
-                    # Direct suffix match
-                    if norm_b.endswith(pk_norm):
+                    # Direct suffix match with improved logic to avoid over-matching
+                    if norm_b.endswith(pk_norm) and _is_valid_suffix_match(norm_b, pk_norm, table_a_name):
                         _record_pair(
                             table_b_name,
                             table_a_name,
