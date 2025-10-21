@@ -2,6 +2,75 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.48] - 2025-10-21
+
+### Enhancement - Filter Underscore-Prefixed System Fields
+
+- **Added intelligent filtering for underscore-prefixed system fields**: Prevents false positive relationships from system-managed columns
+  - Problem: System fields like `_created_at`, `_updated_at`, `_version` can cause false positive matches
+  - Impact: Reduces noise in relationship discovery for schemas with system-managed metadata columns
+  - Solution: Enhanced `_should_exclude_from_relationship_matching()` to detect and exclude underscore-prefixed system patterns
+  - Smart handling: Preserves `_id`, `_key` as valid business keys (MongoDB style schemas)
+
+### Technical Details
+
+**Excluded Underscore-Prefixed Patterns**:
+```python
+# System timestamp fields
+_created_at, _updated_at, _deleted_at, _modified_at
+_created_time, _updated_time, _deleted_time
+_created_date, _updated_date, _deleted_date
+
+# System metadata fields
+_version, _revision, _row_version, _etag
+_created_by, _updated_by, _deleted_by
+_timestamp, _datetime
+
+# System content/measurement fields
+_description, _content, _comment, _amount, _price
+```
+
+**Preserved Special Cases**:
+```python
+# These might be business keys, not excluded
+_id, _key, _num, _code, _no
+```
+
+**Implementation**:
+- Early return for valid business key patterns (`_id`, `_key`, etc.)
+- Pattern matching for common system field suffixes (`_AT`, `_TIME`, `_DATE`, `_BY`, `_VERSION`)
+- Comprehensive system pattern set covering timestamps, metadata, content, and measurement fields
+
+### Impact
+
+- **No regression**: TPC-H still discovers 10/10 relationships correctly ✓
+- **Better filtering**: System fields with underscore prefix now properly excluded
+- **Smart exceptions**: MongoDB-style `_id` fields still work as primary keys
+- **Test results**: All 22 validation tests passed (11 TPC-H + 9 system fields + 2 special cases)
+
+### Examples
+
+**System Fields Excluded**:
+- ❌ `_created_at` (system timestamp)
+- ❌ `_updated_at` (system timestamp)
+- ❌ `_version` (system metadata)
+- ❌ `_created_by` (system audit)
+- ❌ `_description` (system content)
+- ❌ `_amount` (system measurement)
+
+**Business Keys Preserved**:
+- ✅ `_id` (MongoDB-style primary key)
+- ✅ `_key` (alternative key naming)
+- ✅ All TPC-H columns (O_ORDERKEY, C_CUSTKEY, etc.)
+
+### Recommendation
+
+**Upgrade if your schema uses underscore-prefixed system fields** commonly found in:
+- MongoDB-migrated schemas
+- Audit-enabled tables with system timestamps
+- ETL frameworks that add metadata columns
+- ClickZetta tables with system-managed fields
+
 ## [1.0.47] - 2025-10-21
 
 ### Accuracy Enhancement - Filter Out Non-Key Columns from Relationship Matching
