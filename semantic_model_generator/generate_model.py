@@ -258,6 +258,36 @@ def _table_variants(table_name: str) -> set[str]:
     return {variant for variant in variants if variant}
 
 
+
+
+def _normalized_table_tokens(table_name: str) -> set[str]:
+    """Return normalized tokens representing a table name."""
+    variants = _table_variants(table_name)
+    normalized: set[str] = set()
+    for variant in variants:
+        singular = _singularize(variant)
+        if singular and singular not in _GENERIC_IDENTIFIER_TOKENS:
+            normalized.add(singular.upper())
+    return normalized
+
+def _normalized_column_tokens(column_name: str) -> set[str]:
+    tokens = set()
+    for token in _identifier_tokens(column_name):
+        if not token:
+            continue
+        singular = _singularize(token)
+        upper = singular.upper()
+        if upper and upper not in _GENERIC_IDENTIFIER_TOKENS:
+            tokens.add(upper)
+    return tokens
+
+def _column_mentions_table(column_name: str, table_name: str) -> bool:
+    column_tokens = _normalized_column_tokens(column_name)
+    if not column_tokens:
+        return False
+    table_tokens = _normalized_table_tokens(table_name)
+    return bool(column_tokens & table_tokens)
+
 _GENERIC_PREFIXES = {
     "DIM",
     "FACT",

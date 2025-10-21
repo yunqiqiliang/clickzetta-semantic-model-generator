@@ -150,6 +150,71 @@ def test_discover_relationships_from_table_definitions_allows_manual_metadata() 
     )
 
 
+def _order_items_orders_products_payload() -> List[Dict[str, Any]]:
+    return [
+        {
+            "table_name": "order_items",
+            "columns": [
+                {"name": "order_item_id", "type": "NUMBER", "is_primary_key": True},
+                {"name": "order_id", "type": "NUMBER"},
+                {"name": "product_id", "type": "NUMBER"},
+            ],
+        },
+        {
+            "table_name": "orders",
+            "columns": [
+                {"name": "order_id", "type": "NUMBER", "is_primary_key": True},
+                {"name": "customer_id", "type": "NUMBER"},
+            ],
+        },
+        {
+            "table_name": "products",
+            "columns": [
+                {"name": "product_id", "type": "NUMBER", "is_primary_key": True},
+                {"name": "product_name", "type": "STRING"},
+            ],
+        },
+    ]
+
+
+def test_misaligned_id_relationships_are_filtered() -> None:
+    payload = _order_items_orders_products_payload()
+
+    result = discover_relationships_from_table_definitions(
+        payload,
+        min_confidence=0.6,
+        max_relationships=10,
+    )
+
+    pairs = {(rel.left_table, rel.right_table) for rel in result.relationships}
+    assert ("ORDER_ITEMS", "ORDERS") in pairs
+    assert ("ORDER_ITEMS", "PRODUCTS") in pairs
+
+    direct = [
+        rel
+        for rel in result.relationships
+        if rel.left_table == "ORDERS" and rel.right_table == "PRODUCTS"
+    ]
+    assert direct, "Expected bridge-derived ORDERS -> PRODUCTS relationship"
+    assert all("_via_" in rel.name.lower() for rel in direct)
+
+
+
+
+def test_relationship_discovery_is_order_invariant() -> None:
+    payload = _order_items_orders_products_payload()
+    result_forward = discover_relationships_from_table_definitions(payload)
+
+    result_reversed = discover_relationships_from_table_definitions(
+        list(reversed(payload))
+    )
+
+    forward_pairs = {(rel.left_table, rel.right_table) for rel in result_forward.relationships}
+    reversed_pairs = {(rel.left_table, rel.right_table) for rel in result_reversed.relationships}
+
+    assert forward_pairs == reversed_pairs
+
+
 def test_discover_relationships_from_table_definitions_filters_generic_ids() -> None:
     payload = [
         {
