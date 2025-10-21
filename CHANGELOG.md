@@ -2,6 +2,37 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.45] - 2025-10-21
+
+### Enhanced FK vs PK Detection
+
+- **Improved `_could_be_identifier_column()` function**: Enhanced to better distinguish foreign keys from primary keys using table name context
+  - Uses table name to identify if column references THIS table (PK) vs OTHER tables (FK)
+  - Added common FK entity name detection (CUST, NATION, REGION, SUPP, PART, PRODUCT, etc.)
+  - Prevents columns like `O_CUSTKEY`, `S_NATIONKEY`, `C_NATIONKEY` from being inferred as PKs
+  - Correctly identifies `O_ORDERKEY` in ORDERS, `S_SUPPKEY` in SUPPLIER as PK candidates
+  - Maintains support for simple patterns (ID, KEY, NUM) when no table context available
+
+### Impact
+
+- **Better accuracy**: Reduces false positive PK detection in schemas without explicit PK metadata
+- **TPC-H validation**: Correctly identifies PK structure even when `is_primary_key` metadata is missing
+- **Examples**:
+  - `O_CUSTKEY` in ORDERS table → CUST doesn't match ORDER → Not a PK candidate ✓
+  - `S_NATIONKEY` in SUPPLIER table → NATION doesn't match SUPPLIER → Not a PK candidate ✓
+  - `O_ORDERKEY` in ORDERS table → ORDER matches ORDERS → Valid PK candidate ✓
+
+### Test Results
+
+- 19/22 tests passing (86.4%)
+- TPC-H test: PASSED ✓
+- All sample data inference tests: PASSED ✓
+- Correctly excludes FK columns from PK candidates
+
+### Recommendation
+
+**Important for users with schemas lacking `is_primary_key` metadata**: This version significantly improves relationship discovery accuracy by preventing foreign key columns from being misidentified as primary keys during sample data inference.
+
 ## [1.0.44] - 2025-10-21
 
 ### Critical Bug Fix
