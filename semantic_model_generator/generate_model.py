@@ -934,8 +934,8 @@ def _generate_optimized_relationship_candidates(metadata, _record_pair, status_d
             # Sort matches by score (highest first)
             all_matches.sort(key=lambda x: x["score"], reverse=True)
 
-            # CRITICAL: Record only the BEST match for each FK column to avoid inconsistent composite keys
-            # Exception: If sample data confidence is very high (>0.8), record top matches
+            # CRITICAL: Record all TIED matches (same top score) to avoid missing valid relationships
+            # But avoid weak matches that create inconsistent composite keys
             if all_matches:
                 # DEBUG: Log for LINEITEM FK columns
                 if fk_table_name.upper() == "LINEITEM" and fk_meta["names"][0].upper() in ["L_PARTKEY", "L_SUPPKEY"]:
@@ -943,20 +943,29 @@ def _generate_optimized_relationship_candidates(metadata, _record_pair, status_d
                     for i, match in enumerate(all_matches, 1):
                         print(f"     {i}. {match['pk_table']}.{match['pk_column']} - Score: {match['score']:.3f}")
 
-                # Record best match (highest score)
-                best_match = all_matches[0]
-                _record_pair(
-                    fk_table_name,
-                    best_match["pk_table"],
-                    fk_meta["names"][0],
-                    best_match["pk_column"]
-                )
+                # Get the best score
+                best_score = all_matches[0]["score"]
+
+                # Record ALL matches with the best score (handle ties)
+                # This ensures we don't miss relationships when multiple PKs have equal match quality
+                # Example: LINEITEM.l_partkey matches both PART.p_partkey and PARTSUPP.ps_partkey with same score
+                for match in all_matches:
+                    if match["score"] >= best_score:
+                        _record_pair(
+                            fk_table_name,
+                            match["pk_table"],
+                            fk_meta["names"][0],
+                            match["pk_column"]
+                        )
+                    else:
+                        # Stop when we hit a lower score (since list is sorted by score descending)
+                        break
 
                 # Also record additional matches if they have very high sample data confidence
-                # (indicates strong data-driven evidence for multiple relationships)
+                # (indicates strong data-driven evidence, even if score is slightly lower)
                 if len(all_matches) > 1:
                     for match in all_matches[1:]:
-                        if match["sample_data_confidence"] > 0.8:
+                        if match["score"] < best_score and match["sample_data_confidence"] > 0.8:
                             _record_pair(
                                 fk_table_name,
                                 match["pk_table"],
