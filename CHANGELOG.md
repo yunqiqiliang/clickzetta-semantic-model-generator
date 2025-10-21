@@ -2,6 +2,16 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.20] - 2025-10-21
+
+### Fixes
+
+- Allow standard star-schema key patterns (e.g., `o_orderkey`, `c_custkey`) while still blocking generic `id` joins; expanded tests cover users/posts/comments and custom prefix tables.
+
+### Testing
+
+- `POETRY_CACHE_DIR=.poetry-cache poetry run pytest -q`
+
 ## [1.0.19] - 2025-10-21
 
 ### Fixes
