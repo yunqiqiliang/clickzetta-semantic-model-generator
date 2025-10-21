@@ -858,13 +858,23 @@ def _detect_many_to_many_relationships(
 
     # Create many-to-many relationships through bridge tables
     for bridge_table, bridge_info in bridge_tables.items():
-        connected_tables = bridge_info["connected_tables"]
+        raw_connected = bridge_info["connected_tables"]
+        connected_tables = []
+        for table in raw_connected:
+            if table not in connected_tables:
+                connected_tables.append(table)
+
+        if len(connected_tables) < 2:
+            continue
 
         # Create relationships for each pair of connected tables
         for i in range(len(connected_tables)):
             for j in range(i + 1, len(connected_tables)):
                 left_table = connected_tables[i]
                 right_table = connected_tables[j]
+
+                if left_table == right_table:
+                    continue
 
                 # Skip if direct relationship already exists
                 existing_pair_names = {
@@ -992,9 +1002,16 @@ def _calculate_relationship_confidence(
     # Factor 2: Name similarity and pattern matching
     if column_pairs:
         total_name_similarity = 0.0
+        misaligned_fk_columns: List[str] = []
+        aligned_fk_columns = 0
         for left_col, right_col in column_pairs:
             similarity = _name_similarity(left_col, right_col)
             total_name_similarity += similarity
+
+            if _column_mentions_table(left_col, right_table):
+                aligned_fk_columns += 1
+            else:
+                misaligned_fk_columns.append(left_col)
 
         avg_name_similarity = total_name_similarity / len(column_pairs)
         evidence_details["avg_name_similarity"] = avg_name_similarity
@@ -1050,6 +1067,19 @@ def _calculate_relationship_confidence(
                 )
 
         confidence_score += min(fk_pattern_confidence, 0.2)
+
+        if misaligned_fk_columns:
+            mismatched = ", ".join(sorted({col.upper() for col in misaligned_fk_columns}))
+            reasoning_factors.append(
+                f"Foreign key column(s) {mismatched} do not reference table '{right_table.upper()}'"
+            )
+            confidence_score = min(confidence_score, 0.15)
+        elif aligned_fk_columns:
+            alignment_bonus = min(0.15, 0.05 * aligned_fk_columns)
+            confidence_score += alignment_bonus
+            reasoning_factors.append(
+                f"Foreign key column naming aligns with target table '{right_table.upper()}'"
+            )
 
     # Factor 3: Sample data uniqueness consistency
     if left_values and right_values:
@@ -1176,7 +1206,7 @@ def _calculate_relationship_confidence(
 
     # Factor 6: Multiple column relationships (composite keys)
     if len(column_pairs) > 1:
-        composite_confidence = 0.1
+        composite_confidence = 0.05
         reasoning_factors.append(
             f"Multi-column relationship ({len(column_pairs)} columns) increases confidence"
         )
