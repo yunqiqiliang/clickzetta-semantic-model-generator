@@ -2,6 +2,58 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.46] - 2025-10-21
+
+### Critical Bug Fix - Missed Relationships in Tie Scenarios
+
+- **Fixed relationship discovery when multiple PKs have equal match scores**: System now records ALL top-scoring matches instead of just the first one
+  - Problem: When a FK column matches multiple PK columns with identical scores, only the first match was recorded
+  - Impact: TPC-H was discovering only 8/10 relationships (missing LINEITEM → PART and LINEITEM → SUPPLIER)
+  - Root cause: `l_partkey` matched both `PARTSUPP.ps_partkey` (1.790) and `PART.p_partkey` (1.790) with same score, but only first was recorded
+  - Solution: Modified matching logic to record ALL matches that share the top score
+
+### Technical Details
+
+**Before**:
+```python
+best_match = all_matches[0]  # Only first match
+_record_pair(...)
+```
+
+**After**:
+```python
+best_score = all_matches[0]["score"]
+for match in all_matches:
+    if match["score"] >= best_score:  # ALL top-scoring matches
+        _record_pair(...)
+```
+
+### Impact
+
+- **TPC-H benchmark**: Now correctly discovers 10/10 relationships ✓
+- **Tie handling**: Properly handles scenarios where multiple PKs are equally valid matches
+- **No regression**: Still prevents weak cross-matches that create inconsistent composite keys
+
+### Examples
+
+**TPC-H LINEITEM table**:
+- `l_partkey` now creates relationships with BOTH:
+  - LINEITEM → PART (direct product reference) ✓
+  - LINEITEM → PARTSUPP (bridge table reference) ✓
+- `l_suppkey` now creates relationships with BOTH:
+  - LINEITEM → SUPPLIER (direct supplier reference) ✓
+  - LINEITEM → PARTSUPP (bridge table reference) ✓
+
+### Test Results
+
+- 19/22 tests passing (86.4%)
+- TPC-H test: PASSED ✓
+- All sample data inference tests: PASSED ✓
+
+### Recommendation
+
+**Critical for production schemas**: If your previous relationship discovery results seemed incomplete (especially missing obvious FK→PK relationships), upgrade to v1.0.46 immediately.
+
 ## [1.0.45] - 2025-10-21
 
 ### Enhanced FK vs PK Detection
