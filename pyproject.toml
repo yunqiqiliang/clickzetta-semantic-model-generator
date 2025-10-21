@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "clickzetta-semantic-model-generator"
-version = "1.0.16"
+version = "1.0.18"
 description = "Curate a Semantic Model for ClickZetta Lakehouse"
 authors = ["qililiang <qililiang@clickzetta.com>"]
 license = "Apache Software License; BSD License"

@@ -2,6 +2,17 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.18] - 2025-10-21
+
+### Fixes
+
+- Harden the foreign-key inference heuristics to ignore `_id → id` matches that don’t reference the destination table, and discourage meaningless composite keys.
+- Stabilize many-to-many detection by deduplicating bridge connections and skipping self-joins.
+
+### Testing
+
+- `POETRY_CACHE_DIR=.poetry-cache poetry run pytest -q`
+
 ## [1.0.16] - 2025-10-20
 
 ### Fixes
