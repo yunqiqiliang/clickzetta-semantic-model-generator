@@ -177,11 +177,9 @@ def enrich_semantic_model(
         )
 
     try:
-        # Build overview without base_table info to prevent LLM from using physical paths
-        overview_for_queries = _build_model_overview(model, raw_lookup, raw_tables, include_base_table=False)
         _generate_verified_queries(
             model,
-            overview_for_queries,
+            overview,
             client,
             placeholder,
             custom_prompt,
@@ -781,7 +779,6 @@ def _build_model_overview(
     model: semantic_model_pb2.SemanticModel,
     raw_lookup: Dict[str, data_types.Table],
     raw_tables: Sequence[Tuple[data_types.FQNParts, data_types.Table]],
-    include_base_table: bool = True,
 ) -> Dict[str, Any]:
     overview: Dict[str, Any] = {
         "name": model.name,
@@ -804,11 +801,7 @@ def _build_model_overview(
         table_info: Dict[str, Any] = {
             "name": table.name,
             "description": (table.description or "").strip(),
-        }
-
-        # Only include base_table info when requested (not needed for verified queries)
-        if include_base_table:
-            table_info["base_table"] = {
+            "base_table": {
                 "database": (
                     table.base_table.database if table.HasField("base_table") else ""
                 ),
@@ -816,7 +809,8 @@ def _build_model_overview(
                     table.base_table.schema if table.HasField("base_table") else ""
                 ),
                 "table": table.base_table.table if table.HasField("base_table") else "",
-            }
+            },
+        }
 
         table_info["dimensions"] = [
             {
@@ -877,8 +871,7 @@ def _build_model_overview(
             if sample_columns:
                 table_info["sample_columns"] = sample_columns
 
-        # Only apply base_table fallback if we're including base_table info
-        if include_base_table and not table_info.get("base_table", {}).get("table"):
+        if not table_info["base_table"].get("table"):
             # Fallback to raw table mapping when proto base_table is missing.
             fallback = base_lookup.get(table.name.upper())
             if fallback:
@@ -1129,9 +1122,13 @@ def _generate_verified_queries(
         "Propose up to three verified analytics queries for the semantic model below. Each query must include:\n"
         "- `name`: short title\n"
         "- `question`: business question answered\n"
-        "- `sql`: runnable ClickZetta SQL using the semantic model table names (NOT base_table paths)\n"
-        "CRITICAL: In SQL, use the logical table names from 'tables' array (e.g., ORDERS, CUSTOMER), "
-        "NOT the base_table.database.schema.table paths. The semantic model handles the mapping.\n"
+        "- `sql`: runnable ClickZetta SQL using FULL table paths from base_table\n"
+        "CRITICAL SQL Table Reference Rules:\n"
+        "1. ALWAYS use the full path: base_table.database.base_table.schema.base_table.table\n"
+        "2. Example: For table ORDERS with base_table {database: 'PROD_DB', schema: 'SALES', table: 'ORDERS'},\n"
+        "   use: SELECT * FROM PROD_DB.SALES.ORDERS\n"
+        "3. DO NOT use just the logical table name (ORDERS) - this will cause 'table not found' errors\n"
+        "4. DO NOT invent database/schema names - use EXACTLY what's in base_table\n"
         "Return JSON with `verified_queries`. Ensure every SQL statement includes an ORDER BY when needed and a LIMIT (<=200) to keep result sets small."
         f"\n\nSemantic model summary:```json\n{prompt_json}\n```"
     )
