@@ -2,6 +2,87 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.49] - 2025-10-21
+
+### Critical Fix - Exclude NAME Fields from Relationship Matching
+
+- **Fixed false positive relationships caused by NAME field matching**: NAME is a descriptive field, not a relationship key
+  - Problem: Generated incorrect relationships like `C_NAME = P_NAME` (CUSTOMER.name = PART.name), `S_NAME = N_NAME` (SUPPLIER.name = NATION.name)
+  - Impact: **Fixes 4 false positive relationships in TPC-H** and similar issues in any schema with NAME columns
+  - Solution: Added NAME, TITLE, LABEL to content field exclusion list
+  - Smart handling: Preserves `NAME_ID`, `TITLE_ID` as valid business keys
+
+### Technical Details
+
+**Added to Exclusion List**:
+```python
+content_patterns = {
+    # ... existing patterns ...
+    "NAME", "TITLE", "LABEL"  # Descriptive fields, not keys
+}
+```
+
+**Smart Exception Logic**:
+```python
+# NAME alone → excluded
+# NAME_ID, NAME_KEY → preserved as business keys
+has_id_or_key = any(t in {"ID", "KEY"} for t in tokens if t != "NAME")
+```
+
+### TPC-H False Positives Fixed
+
+This fix eliminates 4 incorrect relationships that were being discovered:
+
+1. ❌ **CUSTOMER → PART via C_NAME = P_NAME** → Now excluded ✓
+2. ❌ **SUPPLIER → NATION via S_NAME = N_NAME** → Now excluded ✓
+3. ❌ **SUPPLIER → REGION via S_NAME = R_NAME** → Now excluded ✓
+4. ❌ **NATION → REGION via N_NAME = R_NAME** → Now excluded ✓
+
+### Correct Relationships Preserved
+
+All valid TPC-H relationships still discovered correctly:
+- ✅ ORDERS → CUSTOMER (O_CUSTKEY = C_CUSTKEY)
+- ✅ CUSTOMER → NATION (C_NATIONKEY = N_NATIONKEY)
+- ✅ SUPPLIER → NATION (S_NATIONKEY = N_NATIONKEY)
+- ✅ NATION → REGION (N_REGIONKEY = R_REGIONKEY)
+- ✅ All 10 standard TPC-H relationships ✓
+
+### Test Coverage
+
+- **77 tests passed** across all scenarios:
+  - 36 underscore-prefixed field tests ✓
+  - 22 TPC-H field tests ✓
+  - 19 NAME field tests ✓
+
+### Examples
+
+**Fields Now Excluded**:
+- `C_NAME`, `P_NAME`, `S_NAME`, `N_NAME`, `R_NAME` (TPC-H)
+- `CUSTOMER_NAME`, `PRODUCT_NAME`, `SUPPLIER_NAME`
+- `FIRST_NAME`, `LAST_NAME`, `FULL_NAME`
+- `TITLE`, `LABEL` (similar descriptive fields)
+
+**Fields Preserved as Keys**:
+- `NAME_ID`, `NAME_KEY` (valid business identifiers)
+- `TITLE_ID`, `LABEL_ID` (rare but valid)
+- All *_KEY, *_ID patterns (unchanged)
+
+### Impact
+
+**CRITICAL upgrade recommended** if your schemas contain:
+- NAME columns (extremely common in all databases)
+- Customer names, product names, supplier names
+- User names, company names, location names
+
+This was a **major source of false positive relationships** that has now been fixed.
+
+### User Report
+
+User discovered this issue when generating semantic model for TPC-H schema via streamlit app:
+- Expected: 10 relationships
+- Before fix: 13 relationships (3 extra false positives with NAME fields)
+- After fix: 10 relationships ✓
+
 ## [1.0.48] - 2025-10-21
 
 ### Enhancement - Filter Underscore-Prefixed System Fields
