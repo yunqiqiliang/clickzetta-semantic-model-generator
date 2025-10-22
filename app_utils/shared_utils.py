@@ -1416,7 +1416,7 @@ def run_generate_model_str_from_clickzetta(
         status = st.status(
             "Generating semantic model...",
             state="running",
-            expanded=True,
+            expanded=False,
         )
         progress_bar = st.progress(0)
         progress_text = st.empty()

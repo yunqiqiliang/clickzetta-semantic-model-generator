@@ -2,6 +2,15 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.54] - 2025-10-22
+
+### UI Improvement - Cleaner Progress Display
+
+- **Streamlit UI enhancement**: Changed semantic model generation progress display to collapsed by default
+  - Modified `app_utils/shared_utils.py` line 1419: `expanded=False`
+  - Impact: Cleaner interface during model generation, users can expand if they want to see detailed progress
+  - User can still click to expand and view detailed progress steps
+
 ## [1.0.53] - 2025-10-22
 
 ### Critical Fix - Reverted v1.0.52 and Properly Instructed LLM to Use base_table Paths
