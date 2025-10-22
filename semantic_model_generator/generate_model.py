@@ -422,11 +422,14 @@ def _should_exclude_from_relationship_matching(column_name: str, base_type: str 
             if not has_key_id:
                 return True
 
-    # Exclude content/text fields
+    # Exclude content/text fields and name fields
+    # NAME is a descriptive field, NOT a key field
+    # This prevents false positives like: C_NAME = P_NAME, S_NAME = N_NAME
     content_patterns = {
         "DESCRIPTION", "CONTENT", "COMMENT", "COMMENTS", "NOTE", "NOTES",
         "TEXT", "BODY", "MESSAGE", "SUMMARY", "ABSTRACT",
-        "DESC", "DETAILS", "REMARKS", "MEMO"
+        "DESC", "DETAILS", "REMARKS", "MEMO",
+        "NAME", "TITLE", "LABEL"  # Added NAME and similar descriptive fields
     }
 
     if col_upper in content_patterns:
@@ -435,7 +438,11 @@ def _should_exclude_from_relationship_matching(column_name: str, base_type: str 
     for token in tokens:
         if token in content_patterns:
             # But allow if it's part of an ID pattern (rare but possible)
-            if not (token.endswith("_ID") or token.endswith("_KEY")):
+            # Exception: NAME_ID, TITLE_ID would be OK as keys
+            # Check if ANY token has ID or KEY (not just this token)
+            has_id_or_key = any(t in {"ID", "KEY"} or t.endswith("_ID") or t.endswith("_KEY")
+                               for t in tokens if t != token)
+            if not has_id_or_key:
                 return True
 
     # Exclude measurement fields without ID/KEY suffix
