@@ -2,6 +2,79 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.50] - 2025-10-21
+
+### Critical Fix - ClickZetta SQL Syntax in LLM-Generated Queries
+
+- **Fixed SQL dialect mismatch in verified queries and model metrics**: LLM was generating standard SQL functions instead of ClickZetta syntax
+  - Problem: Generated queries used `DATEADD`, `DATEDIFF`, `TO_CHAR` causing validation failures
+  - Error: `CZLH-42000 function not found - 'DATEADD', did you mean 'date_add'?`
+  - Solution: Enhanced system prompts with explicit ClickZetta SQL syntax rules
+  - Impact: Verified queries and model metrics now generate with correct ClickZetta functions
+
+### Technical Details
+
+**Added to System Prompts**:
+
+For verified queries (`_generate_verified_queries`):
+```python
+"IMPORTANT - Use ClickZetta SQL syntax:\n"
+"- Date functions: use date_add(), date_sub(), datediff() (NOT DATEADD, DATEDIFF)\n"
+"- Date formatting: use date_format() (NOT TO_CHAR)\n"
+"- String functions: use concat(), substring() (NOT ||, SUBSTR)\n"
+"- Current date: use current_date(), current_timestamp() (NOT GETDATE, NOW)\n"
+```
+
+For model metrics (`_generate_model_metrics`):
+```python
+"Use ClickZetta SQL syntax: date_add(), date_sub(), datediff(), concat(), substring(), current_date()."
+```
+
+### ClickZetta SQL Function Mapping
+
+| Standard SQL | ClickZetta SQL | Example |
+|--------------|----------------|---------|
+| `DATEADD(day, -30, ...)` | `date_add(..., -30)` | ✅ ClickZetta |
+| `DATEDIFF(a, b)` | `datediff(a, b)` | ✅ ClickZetta |
+| `TO_CHAR(date, format)` | `date_format(date, format)` | ✅ ClickZetta |
+| `str1 || str2` | `concat(str1, str2)` | ✅ ClickZetta |
+| `SUBSTR(str, pos, len)` | `substring(str, pos, len)` | ✅ ClickZetta |
+| `GETDATE()` / `NOW()` | `current_date()` / `current_timestamp()` | ✅ ClickZetta |
+
+### Impact
+
+**Before Fix**:
+```sql
+-- ❌ Generated query would fail
+SELECT * FROM orders
+WHERE order_date > DATEADD(day, -30, GETDATE())
+-- Error: CZLH-42000 function not found - 'DATEADD'
+```
+
+**After Fix**:
+```sql
+-- ✅ Generated query works correctly
+SELECT * FROM orders
+WHERE order_date > date_add(current_date(), -30)
+LIMIT 200
+```
+
+### User Report
+
+User encountered validation failures when generating semantic model via streamlit app:
+- Error message: `Skipping verified query 'High-Value Orders by Customer Segment' due to validation failure: CZLH-42000 function not found - 'DATEADD', did you mean 'date_add'?`
+- Root cause: LLM generating standard SQL syntax instead of ClickZetta dialect
+- Fix: System prompts now explicitly specify ClickZetta SQL syntax rules
+
+### Recommendation
+
+**CRITICAL upgrade** if you use:
+- Verified query generation (streamlit app or API)
+- Model-level metrics generation
+- Any LLM-driven SQL generation features
+
+This fix ensures all generated SQL uses ClickZetta-compatible functions and passes validation.
+
 ## [1.0.49] - 2025-10-21
 
 ### Critical Fix - Exclude NAME Fields from Relationship Matching
