@@ -2,6 +2,108 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.53] - 2025-10-22
+
+### Critical Fix - Reverted v1.0.52 and Properly Instructed LLM to Use base_table Paths
+
+- **Fixed persistent table path errors by reverting v1.0.52 and adding proper instructions**: User feedback revealed v1.0.52's approach (removing base_table) was incorrect
+  - Problem: v1.0.51-52 attempted wrong solutions - v1.0.51 instructed NOT to use base_table, v1.0.52 removed base_table entirely
+  - Root cause identified by user: base_table SHOULD be preserved and USED with full paths in SQL
+  - User feedback: "base_table: database: CLICKZETTA_SAMPLE_DATA schema: TPCH_100G 表名还是要带上比如CLICKZETTA_SAMPLE_DATA.TPCH_100G的路径的"
+  - Solution: Reverted v1.0.52 changes, kept base_table in overview, added explicit instructions to USE full base_table paths
+  - Impact: LLM now generates correct SQL with full physical paths from base_table metadata
+
+### Technical Details
+
+**The Problem**:
+v1.0.51-52 misunderstood the issue:
+- v1.0.51: Instructed LLM to use logical names, NOT base_table paths → Still got errors
+- v1.0.52: Removed base_table from overview entirely → Still wrong approach
+
+**User's Critical Correction**:
+```
+base_table:
+  database: CLICKZETTA_SAMPLE_DATA
+  schema: TPCH_100G
+表名还是要带上比如CLICKZETTA_SAMPLE_DATA.TPCH_100G的路径的;
+关键是把> base_table传错值了吧,现在传成了当前连接的database和schema
+```
+
+Translation: "Table names should include paths like CLICKZETTA_SAMPLE_DATA.TPCH_100G; the key issue is base_table was being passed wrong values, currently showing the connection's database and schema."
+
+**The Solution**:
+```python
+# Reverted v1.0.52 - base_table is back in overview
+table_info["base_table"] = {
+    "database": table.base_table.database,
+    "schema": table.base_table.schema,
+    "table": table.base_table.table
+}
+
+# New instructions explicitly require using base_table paths
+instructions = (
+    "CRITICAL SQL Table Reference Rules:\n"
+    "1. ALWAYS use the full path: base_table.database.base_table.schema.base_table.table\n"
+    "2. Example: For table ORDERS with base_table {database: 'PROD_DB', schema: 'SALES', table: 'ORDERS'},\n"
+    "   use: SELECT * FROM PROD_DB.SALES.ORDERS\n"
+    "3. DO NOT use just the logical table name (ORDERS) - this will cause 'table not found' errors\n"
+    "4. DO NOT invent database/schema names - use EXACTLY what's in base_table\n"
+)
+```
+
+### Impact
+
+**Before Fix** (v1.0.51-52):
+```sql
+-- ❌ v1.0.51: Tried to use logical names
+SELECT * FROM PARTSUPP
+-- Error: table or view not found
+
+-- ❌ v1.0.52: base_table removed, LLM still confused
+SELECT * FROM quick_start.mcp_demo.PARTSUPP
+-- Error: wrong database/schema from current connection
+```
+
+**After Fix** (v1.0.53):
+```sql
+-- ✅ Now generates this with correct base_table paths
+SELECT * FROM CLICKZETTA_SAMPLE_DATA.TPCH_100G.PARTSUPP
+JOIN CLICKZETTA_SAMPLE_DATA.TPCH_100G.SUPPLIER ...
+-- Works correctly!
+```
+
+### User-Reported Errors Fixed
+
+**Error Messages** (persisted through v1.0.51 and v1.0.52):
+```
+CZLH-42000 table or view not found - quick_start.mcp_demo.PARTSUPP
+CZLH-42000 table or view not found - quick_start.mcp_demo.SUPPLIER
+```
+
+**Root Cause**: LLM wasn't being instructed to USE the base_table metadata correctly
+
+**Fix**: Added explicit instructions with example showing how to construct full path from base_table
+
+### Changes Made
+
+**Files Modified**:
+1. `semantic_model_generator/llm/enrichment.py` (lines 778-898):
+   - Reverted v1.0.52's `include_base_table` parameter removal
+   - `_build_model_overview()` now ALWAYS includes base_table
+
+2. `semantic_model_generator/llm/enrichment.py` (lines 1121-1133):
+   - Added CRITICAL SQL Table Reference Rules section
+   - Explicit 4-step instructions with concrete example
+   - Emphasizes using EXACT values from base_table metadata
+
+### Recommendation
+
+**CRITICAL upgrade** - v1.0.51 and v1.0.52 did NOT properly fix the table path issue.
+
+If you're still seeing "table or view not found" errors, upgrade to v1.0.53 immediately.
+
+This fix uses the CORRECT approach based on user feedback: preserve base_table and instruct LLM to use it properly.
+
 ## [1.0.52] - 2025-10-22
 
 ### Critical Fix - Remove base_table from Verified Query Overview
