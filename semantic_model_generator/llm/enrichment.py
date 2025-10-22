@@ -1121,7 +1121,9 @@ def _generate_verified_queries(
         "Propose up to three verified analytics queries for the semantic model below. Each query must include:\n"
         "- `name`: short title\n"
         "- `question`: business question answered\n"
-        "- `sql`: runnable ClickZetta SQL referencing the provided logical tables\n"
+        "- `sql`: runnable ClickZetta SQL using the semantic model table names (NOT base_table paths)\n"
+        "CRITICAL: In SQL, use the logical table names from 'tables' array (e.g., ORDERS, CUSTOMER), "
+        "NOT the base_table.database.schema.table paths. The semantic model handles the mapping.\n"
         "Return JSON with `verified_queries`. Ensure every SQL statement includes an ORDER BY when needed and a LIMIT (<=200) to keep result sets small."
         f"\n\nSemantic model summary:```json\n{prompt_json}\n```"
     )
