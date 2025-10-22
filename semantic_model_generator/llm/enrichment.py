@@ -177,9 +177,11 @@ def enrich_semantic_model(
         )
 
     try:
+        # Build overview without base_table info to prevent LLM from using physical paths
+        overview_for_queries = _build_model_overview(model, raw_lookup, raw_tables, include_base_table=False)
         _generate_verified_queries(
             model,
-            overview,
+            overview_for_queries,
             client,
             placeholder,
             custom_prompt,
@@ -779,6 +781,7 @@ def _build_model_overview(
     model: semantic_model_pb2.SemanticModel,
     raw_lookup: Dict[str, data_types.Table],
     raw_tables: Sequence[Tuple[data_types.FQNParts, data_types.Table]],
+    include_base_table: bool = True,
 ) -> Dict[str, Any]:
     overview: Dict[str, Any] = {
         "name": model.name,
@@ -801,7 +804,11 @@ def _build_model_overview(
         table_info: Dict[str, Any] = {
             "name": table.name,
             "description": (table.description or "").strip(),
-            "base_table": {
+        }
+
+        # Only include base_table info when requested (not needed for verified queries)
+        if include_base_table:
+            table_info["base_table"] = {
                 "database": (
                     table.base_table.database if table.HasField("base_table") else ""
                 ),
@@ -809,51 +816,51 @@ def _build_model_overview(
                     table.base_table.schema if table.HasField("base_table") else ""
                 ),
                 "table": table.base_table.table if table.HasField("base_table") else "",
-            },
-            "dimensions": [
-                {
-                    "name": dim.name,
-                    "expr": dim.expr,
-                    "data_type": dim.data_type,
-                    "description": (dim.description or "").strip(),
-                }
-                for dim in table.dimensions
-            ],
-            "time_dimensions": [
-                {
-                    "name": dim.name,
-                    "expr": dim.expr,
-                    "data_type": dim.data_type,
-                    "description": (dim.description or "").strip(),
-                }
-                for dim in table.time_dimensions
-            ],
-            "facts": [
-                {
-                    "name": fact.name,
-                    "expr": fact.expr,
-                    "data_type": fact.data_type,
-                    "description": (fact.description or "").strip(),
-                }
-                for fact in table.facts
-            ],
-            "metrics": [
-                {
-                    "name": metric.name,
-                    "expr": metric.expr,
-                    "description": (metric.description or "").strip(),
-                }
-                for metric in table.metrics
-            ],
-            "filters": [
-                {
-                    "name": nf.name,
-                    "expr": nf.expr,
-                    "description": (nf.description or "").strip(),
-                }
-                for nf in table.filters
-            ],
-        }
+            }
+
+        table_info["dimensions"] = [
+            {
+                "name": dim.name,
+                "expr": dim.expr,
+                "data_type": dim.data_type,
+                "description": (dim.description or "").strip(),
+            }
+            for dim in table.dimensions
+        ]
+        table_info["time_dimensions"] = [
+            {
+                "name": dim.name,
+                "expr": dim.expr,
+                "data_type": dim.data_type,
+                "description": (dim.description or "").strip(),
+            }
+            for dim in table.time_dimensions
+        ]
+        table_info["facts"] = [
+            {
+                "name": fact.name,
+                "expr": fact.expr,
+                "data_type": fact.data_type,
+                "description": (fact.description or "").strip(),
+            }
+            for fact in table.facts
+        ]
+        table_info["metrics"] = [
+            {
+                "name": metric.name,
+                "expr": metric.expr,
+                "description": (metric.description or "").strip(),
+            }
+            for metric in table.metrics
+        ]
+        table_info["filters"] = [
+            {
+                "name": nf.name,
+                "expr": nf.expr,
+                "description": (nf.description or "").strip(),
+            }
+            for nf in table.filters
+        ]
 
         # Provide raw column snapshot for additional context.
         raw_table = raw_lookup.get(table.name.upper())
@@ -870,7 +877,8 @@ def _build_model_overview(
             if sample_columns:
                 table_info["sample_columns"] = sample_columns
 
-        if not table_info["base_table"].get("table"):
+        # Only apply base_table fallback if we're including base_table info
+        if include_base_table and not table_info.get("base_table", {}).get("table"):
             # Fallback to raw table mapping when proto base_table is missing.
             fallback = base_lookup.get(table.name.upper())
             if fallback:
