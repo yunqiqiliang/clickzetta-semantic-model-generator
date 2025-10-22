@@ -2,6 +2,86 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.51] - 2025-10-22
+
+### Critical Fix - Table References and Chat SQL Syntax
+
+- **Fixed two critical issues in SQL generation**: Table path errors and missing SQL syntax guidance in chat interface
+  - Problem 1: Verified queries used base_table paths (e.g., `quick_start.mcp_demo.PARTSUPP`) instead of semantic model table names
+  - Problem 2: Chat interface lacked ClickZetta SQL syntax guidance, causing DATEADD errors
+  - Solution: Enhanced prompts to use logical table names and added SQL syntax rules to chat
+  - Impact: Verified queries now validate successfully, chat generates correct ClickZetta SQL
+
+### Technical Details
+
+**Issue 1: Table Path Errors**
+
+Before fix:
+```sql
+-- ❌ LLM generated this (WRONG)
+SELECT * FROM quick_start.mcp_demo.PARTSUPP
+-- Error: table or view not found - quick_start.mcp_demo.PARTSUPP
+```
+
+After fix:
+```sql
+-- ✅ LLM now generates this (CORRECT)
+SELECT * FROM PARTSUPP
+-- Semantic model handles the mapping to physical table
+```
+
+**Changes in `enrichment.py`**:
+```python
+"CRITICAL: In SQL, use the logical table names from 'tables' array (e.g., ORDERS, CUSTOMER), "
+"NOT the base_table.database.schema.table paths. The semantic model handles the mapping."
+```
+
+**Issue 2: Chat SQL Syntax**
+
+Added to `app_utils/chat.py` system prompt:
+```python
+"IMPORTANT - Use ClickZetta SQL syntax:\n"
+"- Date functions: use date_add(), date_sub(), datediff() (NOT DATEADD, DATEDIFF)\n"
+"- Date formatting: use date_format() (NOT TO_CHAR)\n"
+"- String functions: use concat(), substring() (NOT ||, SUBSTR)\n"
+"- Current date: use current_date(), current_timestamp() (NOT GETDATE, NOW)\n"
+```
+
+### User-Reported Errors Fixed
+
+**Error Messages**:
+```
+CZLH-42000 Semantic analysis exception - table or view not found - quick_start.mcp_demo.PARTSUPP
+CZLH-42000 Semantic analysis exception - table or view not found - quick_start.mcp_demo.SUPPLIER
+CZLH-42000 Semantic analysis exception - table or view not found - quick_start.mcp_demo.CUSTOMER
+CZLH-42000 function not found - 'DATEADD', did you mean 'date_add'?
+```
+
+**Root Causes**:
+1. LLM mistakenly used physical table paths from `base_table` metadata
+2. Chat interface system prompt didn't specify ClickZetta SQL syntax
+
+### Impact
+
+**Verified Query Generation**:
+- ✅ Now uses semantic model table names (ORDERS, CUSTOMER, PARTSUPP)
+- ✅ Queries validate successfully against ClickZetta
+- ✅ No more "table or view not found" errors
+
+**Chat Interface**:
+- ✅ Generates ClickZetta-compatible SQL functions
+- ✅ No more DATEADD/DATEDIFF function errors
+- ✅ Consistent with verified query generation
+
+### Recommendation
+
+**CRITICAL upgrade** if you use:
+- Streamlit chat interface (`poetry run streamlit run app.py`)
+- Verified query generation
+- Any interactive SQL generation features
+
+This fix ensures all LLM-generated SQL uses correct table references and ClickZetta syntax.
+
 ## [1.0.50] - 2025-10-21
 
 ### Critical Fix - ClickZetta SQL Syntax in LLM-Generated Queries
