@@ -1003,7 +1003,8 @@ def _generate_model_metrics(
         {
             "role": "system",
             "content": (
-                "You are an analytics engineer. Only respond in JSON and propose business-friendly metrics."
+                "You are an analytics engineer for ClickZetta Lakehouse. Only respond in JSON and propose business-friendly metrics. "
+                "Use ClickZetta SQL syntax: date_add(), date_sub(), datediff(), concat(), substring(), current_date()."
             ),
         },
         {"role": "user", "content": instructions},
@@ -1131,7 +1132,13 @@ def _generate_verified_queries(
         {
             "role": "system",
             "content": (
-                "You create example analytical queries. Return JSON only. Make sure SQL uses valid column names and respects join relationships."
+                "You create example analytical queries for ClickZetta Lakehouse. Return JSON only. "
+                "IMPORTANT - Use ClickZetta SQL syntax:\n"
+                "- Date functions: use date_add(), date_sub(), datediff() (NOT DATEADD, DATEDIFF)\n"
+                "- Date formatting: use date_format() (NOT TO_CHAR)\n"
+                "- String functions: use concat(), substring() (NOT ||, SUBSTR)\n"
+                "- Current date: use current_date(), current_timestamp() (NOT GETDATE, NOW)\n"
+                "Make sure SQL uses valid column names and respects join relationships."
             ),
         },
         {"role": "user", "content": instructions},
