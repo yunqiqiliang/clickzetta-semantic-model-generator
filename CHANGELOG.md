@@ -2,6 +2,130 @@
 
 You must follow the format of `## [VERSION-NUMBER]` for the GitHub workflow to pick up the text.
 
+## [1.0.52] - 2025-10-22
+
+### Critical Fix - Remove base_table from Verified Query Overview
+
+- **Fixed persistent table path errors in verified queries**: LLM was seeing base_table metadata and using physical paths
+  - Problem: Even with instructions not to use base_table paths, LLM still generated `quick_start.mcp_demo.PARTSUPP`
+  - Root cause: Overview JSON contained base_table metadata that confused the LLM
+  - Solution: Build separate overview for verified queries WITHOUT base_table information
+  - Impact: LLM now only sees logical table names, cannot accidentally use physical paths
+
+### Technical Details
+
+**The Problem**:
+```json
+// Overview JSON shown to LLM (BEFORE)
+{
+  "tables": [
+    {
+      "name": "PARTSUPP",
+      "base_table": {
+        "database": "quick_start",
+        "schema": "mcp_demo",
+        "table": "PARTSUPP"
+      },
+      ...
+    }
+  ]
+}
+```
+
+LLM saw this and thought: "Oh, I should use `quick_start.mcp_demo.PARTSUPP`!"
+
+**The Solution**:
+```json
+// Overview JSON shown to LLM (AFTER)
+{
+  "tables": [
+    {
+      "name": "PARTSUPP",
+      // NO base_table field at all!
+      "dimensions": [...],
+      "facts": [...]
+    }
+  ]
+}
+```
+
+LLM now only sees `PARTSUPP` and has no choice but to use it correctly.
+
+**Implementation**:
+```python
+# Modified _build_model_overview to accept parameter
+def _build_model_overview(..., include_base_table: bool = True):
+    if include_base_table:
+        table_info["base_table"] = {...}  # Only add when needed
+
+# For verified queries, exclude base_table
+overview_for_queries = _build_model_overview(
+    model, raw_lookup, raw_tables,
+    include_base_table=False  # ← Key change
+)
+
+# For model metrics, keep base_table (doesn't matter, not used in SQL)
+overview = _build_model_overview(
+    model, raw_lookup, raw_tables,
+    include_base_table=True  # ← Default behavior
+)
+```
+
+### Why Instructions Weren't Enough
+
+v1.0.51 added instructions like:
+```
+"CRITICAL: use logical table names, NOT base_table paths"
+```
+
+But this didn't work because:
+1. LLM saw contradictory information (instructions vs. actual data)
+2. LLM tried to be "helpful" by using fully-qualified names
+3. Instructions competed with observable data structure
+
+**Solution**: Don't show the data at all. Problem solved.
+
+### Impact
+
+**Before Fix** (v1.0.51 and earlier):
+```sql
+-- ❌ LLM still generated this despite instructions
+SELECT * FROM quick_start.mcp_demo.PARTSUPP
+JOIN quick_start.mcp_demo.SUPPLIER ...
+-- Error: table or view not found
+```
+
+**After Fix** (v1.0.52):
+```sql
+-- ✅ LLM can ONLY generate this
+SELECT * FROM PARTSUPP
+JOIN SUPPLIER ...
+-- Works correctly!
+```
+
+### User-Reported Errors Fixed
+
+**Error Messages** (persisted even in v1.0.51):
+```
+CZLH-42000 table or view not found - quick_start.mcp_demo.PARTSUPP
+CZLH-42000 table or view not found - quick_start.mcp_demo.SUPPLIER
+CZLH-42000 table or view not found - quick_start.mcp_demo.CUSTOMER
+CZLH-42000 table or view not found - quick_start.mcp_demo.NATION
+CZLH-42000 table or view not found - quick_start.mcp_demo.REGION
+```
+
+**Root Cause**: Overview JSON exposed base_table metadata to LLM
+
+**Fix**: Removed base_table from verified query overview completely
+
+### Recommendation
+
+**CRITICAL upgrade** - v1.0.51 did NOT fully fix the table path issue.
+
+If you're still seeing "table or view not found" errors with physical paths like `database.schema.table`, upgrade to v1.0.52 immediately.
+
+This fix uses a "removal" strategy instead of "instruction" strategy - much more reliable.
+
 ## [1.0.51] - 2025-10-22
 
 ### Critical Fix - Table References and Chat SQL Syntax
