@@ -48,6 +48,7 @@ class RelationshipDiscoveryResult:
     # Real per-relationship confidence scores, keyed by relationship name.
     # Populated from the inference side-channel; empty if unavailable.
     confidence_by_name: Dict[str, float] = field(default_factory=dict)
+    missed_candidates: List[Dict] = field(default_factory=list)
 
 
 def _normalize_table_names(table_names: Optional[Iterable[str]]) -> Optional[List[str]]:
@@ -348,6 +349,7 @@ def discover_relationships_from_tables(
         tables=[table for _, table in raw_tables],
         summary=summary,
         confidence_by_name=dict(status.get("confidence_by_name", {})),
+        missed_candidates=list(status.get("missed_candidates", [])),
     )
 
 

@@ -1332,22 +1332,77 @@ def _generate_optimized_relationship_candidates(metadata, _record_pair, status_d
                                 match["pk_column"]
                             )
             else:
-                # DEBUG: Log columns that didn't find a match (potential missing relationships)
+                # Collect columns that had potential matches but were blocked by
+                # semantic validation (entity mismatch, type incompatibility, etc.)
+                # These are structural "near misses" that LLM can resolve semantically.
                 fk_core = _extract_core_entity(fk_meta["names"][0])
-                if fk_core and len(fk_core) >= 3:  # Only log meaningful entity names
-                    # Check if there are any PK candidates with the same core entity
+                if fk_core and len(fk_core) >= 3:
                     potential_matches = []
                     for (pk_table_name, pk_norm), pk_info in pk_lookup.items():
                         if pk_table_name == fk_table_name:
                             continue
                         pk_core = _extract_core_entity(pk_info["meta"]["names"][0])
                         if fk_core == pk_core or _are_entity_variants(fk_core, pk_core):
-                            potential_matches.append(f"{pk_table_name}.{pk_info['meta']['names'][0]}")
+                            potential_matches.append({
+                                "pk_table": pk_table_name,
+                                "pk_column": pk_info["meta"]["names"][0],
+                            })
+
+                    # Self-referential check: when no cross-table matches found,
+                    # check if this column could be a self-ref FK to the same
+                    # table's PK (e.g. mgr_id→emp_id in EMPLOYEES).
+                    # Condition: FK column is not a PK of this table, and the table
+                    # has at least one PK candidate whose entity core differs from
+                    # the FK core (same-type same-table relationship).
+                    if not potential_matches:
+                        own_pks = fk_table_meta.get("pk_candidates", {})
+                        for pk_norm2, pk_cols2 in own_pks.items():
+                            if pk_norm2 == fk_norm:
+                                continue  # same column
+                            pk_col_name = pk_cols2[0] if pk_cols2 else ""
+                            pk_core2 = _extract_core_entity(pk_col_name)
+                            # Same base type required
+                            pk_meta2 = fk_table_meta["columns"].get(pk_norm2)
+                            if not pk_meta2:
+                                continue
+                            if pk_meta2.get("base_type") != fk_meta.get("base_type"):
+                                continue
+                            # Different core entity (not same column renamed):
+                            # this is a candidate self-ref (mgr≠emp, but both BIGINT)
+                            if pk_core2 and pk_core2 != fk_core:
+                                potential_matches.append({
+                                    "pk_table": fk_table_name,  # same table
+                                    "pk_column": pk_col_name,
+                                    "_self_ref": True,
+                                })
 
                     if potential_matches:
-                        print(f"  ⚠️  No match found for {fk_table_name}.{fk_meta['names'][0]} (core: {fk_core})")
-                        print(f"      Potential matches with same core: {', '.join(potential_matches)}")
-                        print(f"      Hint: Check similarity threshold or type compatibility")
+                        # Store for structured retrieval (pending LLM judgement).
+                        missed = status_dict.setdefault("missed_candidates", [])
+                        for pm in potential_matches:
+                            pk_meta_ref = pk_lookup.get(
+                                (pm["pk_table"],
+                                 _sanitize_identifier_name(pm["pk_column"])),
+                                {}
+                            )
+                            # For self-ref, look up values from own table columns
+                            if pm.get("_self_ref"):
+                                pk_vals = list((fk_table_meta["columns"]
+                                    .get(_sanitize_identifier_name(pm["pk_column"]), {})
+                                    .get("values") or [])[:10])
+                            else:
+                                pk_vals = list((pk_meta_ref.get("meta", {})
+                                    .get("values") or [])[:10])
+                            missed.append({
+                                "fk_table": fk_table_name,
+                                "fk_column": fk_meta["names"][0],
+                                "pk_table": pm["pk_table"],
+                                "pk_column": pm["pk_column"],
+                                "fk_core": fk_core,
+                                "self_ref": pm.get("_self_ref", False),
+                                "fk_values": list((fk_meta.get("values") or [])[:10]),
+                                "pk_values": pk_vals,
+                            })
 
 
 def _analyze_composite_key_patterns(
@@ -3988,8 +4043,9 @@ def _infer_relationships(
             # name matches the table (e.g. USER_ID inside USER_SESSIONS / USER_EVENTS,
             # whose real PK is SESSION_ID / EVENT_ID). This removes heuristic false
             # PKs that otherwise link every table sharing the column name.
-            # IMPORTANT: veto only applies to name-matched candidates. Composite key
-            # columns may each have low individual uniqueness — do NOT veto data path.
+            # IMPORTANT: veto only applies to name-matched candidates. Columns that
+            # are part of a composite key may each have low individual uniqueness yet
+            # together form a valid PK — do NOT veto the data-inferred path.
             _uniq = getattr(column, "sample_uniqueness", None)
             _name_matches_pk = _looks_like_primary_key(raw_table.name, column.column_name)
             _dup_evidence = _uniq is not None and _uniq < 0.9 and _name_matches_pk
