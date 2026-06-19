@@ -259,6 +259,72 @@ def _fetch_distinct_values(
         return None
 
 
+def _fetch_table_column_values(
+    session: Session,
+    workspace: str,
+    schema_name: str,
+    table_name: str,
+    column_names: List[str],
+    ndv: int,
+) -> Optional[Dict[str, Dict[str, Any]]]:
+    """Sample value lists for ALL columns of a table in ONE query.
+
+    Replaces N per-column ``SELECT DISTINCT col ... LIMIT ndv`` round-trips with a
+    single ``SELECT col1, col2, ... FROM t LIMIT (ndv)`` row sample, then derives
+    up to ``ndv`` distinct values per column locally. This dramatically cuts
+    network round-trips on wide schemas (cost goes from O(#columns) to O(1) per
+    table) while preserving the "distinct sample values per column" semantics the
+    downstream relationship inference relies on. Returns None on failure so the
+    caller can fall back to per-column sampling.
+    """
+    if ndv <= 0 or not column_names:
+        return None
+    workspace_part = _sanitize_identifier(workspace, workspace) if workspace else ""
+    schema_part = _sanitize_identifier(schema_name, schema_name) if schema_name else ""
+    table_part = _sanitize_identifier(table_name, table_name)
+    qualified_table = join_quoted_identifiers(workspace_part, schema_part, table_part)
+    select_expr = ", ".join(quote_identifier(_sanitize_identifier(c, c)) for c in column_names)
+    # Fetch enough rows to expose up to `ndv` distinct values per column. Row
+    # sampling (keeping duplicates) is at least as informative as DISTINCT for
+    # both uniqueness checks and value-overlap matching.
+    row_limit = max(ndv, 100)
+    query = f"SELECT {select_expr} FROM {qualified_table} LIMIT {row_limit}"
+    try:
+        df = session.sql(query).to_pandas()
+    except Exception as exc:  # pragma: no cover - defensive, triggers fallback
+        logger.warning(
+            "Batched sample failed for {}.{}.{} ({}); falling back to per-column",
+            workspace, schema_name, table_name, exc,
+        )
+        return None
+    if df.empty:
+        return {c: {"values": [], "uniqueness": None} for c in column_names}
+    result: Dict[str, Dict[str, Any]] = {}
+    # Map requested column names to actual dataframe columns case-insensitively.
+    lower_map = {str(col).lower(): col for col in df.columns}
+    for cname in column_names:
+        df_col = lower_map.get(str(cname).lower())
+        if df_col is None:
+            result[cname] = {"values": [], "uniqueness": None}
+            continue
+        raw = df[df_col].tolist()
+        # Uniqueness over the raw, duplicate-preserving, non-null sample.
+        non_null = [v for v in raw if v is not None and not (isinstance(v, float) and pd.isna(v))]
+        uniqueness = (len(set(str(v) for v in non_null)) / len(non_null)) if non_null else None
+        # Distinct value list (capped at ndv) for downstream overlap/PK checks.
+        seen: List[str] = []
+        seen_set = set()
+        for value in raw:
+            sval = str(value)
+            if sval not in seen_set:
+                seen_set.add(sval)
+                seen.append(sval)
+                if len(seen) >= ndv:
+                    break
+        result[cname] = {"values": seen, "uniqueness": uniqueness}
+    return result
+
+
 def _get_column_representation(
     session: Session,
     workspace: str,
@@ -267,6 +333,7 @@ def _get_column_representation(
     column_row: pd.Series,
     column_index: int,
     ndv: int,
+    presampled_values: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Column:
     column_name = column_row[_COLUMN_NAME_COL]
     column_datatype_raw = column_row[_DATATYPE_COL]
@@ -275,8 +342,14 @@ def _get_column_representation(
     else:
         column_datatype = str(column_datatype_raw)
     column_datatype = _normalize_column_type(column_datatype)
-    column_values = (
-        _fetch_distinct_values(
+    sample_uniqueness: Optional[float] = None
+    if presampled_values is not None:
+        # Values already obtained via the batched per-table sample.
+        entry = presampled_values.get(column_name) or {}
+        column_values = entry.get("values") or None
+        sample_uniqueness = entry.get("uniqueness")
+    elif ndv > 0:
+        column_values = _fetch_distinct_values(
             session=session,
             workspace=workspace,
             schema_name=schema_name,
@@ -284,9 +357,8 @@ def _get_column_representation(
             column_name=column_name,
             ndv=ndv,
         )
-        if ndv > 0
-        else None
-    )
+    else:
+        column_values = None
 
     raw_primary = column_row.get(_IS_PRIMARY_KEY_COL)
     if isinstance(raw_primary, str):
@@ -302,6 +374,7 @@ def _get_column_representation(
         column_type=column_datatype,
         values=column_values,
         is_primary_key=is_primary,
+        sample_uniqueness=sample_uniqueness,
     )
 
 
@@ -317,6 +390,20 @@ def get_table_representation(
 ) -> Table:
     table_comment = _get_table_comment(columns_df)
 
+    # Try one batched per-table sample first (O(1) network round-trips instead of
+    # O(#columns)). Falls back to per-column sampling if it fails.
+    presampled_values: Optional[Dict[str, List[str]]] = None
+    if ndv_per_column > 0:
+        col_names = [row[_COLUMN_NAME_COL] for _, row in columns_df.iterrows()]
+        presampled_values = _fetch_table_column_values(
+            session=session,
+            workspace=workspace,
+            schema_name=schema_name,
+            table_name=table_name,
+            column_names=col_names,
+            ndv=ndv_per_column,
+        )
+
     def _get_col(col_index: int, column_row: pd.Series) -> Column:
         return _get_column_representation(
             session=session,
@@ -326,6 +413,7 @@ def get_table_representation(
             column_row=column_row,
             column_index=col_index,
             ndv=ndv_per_column,
+            presampled_values=presampled_values,
         )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import pandas as pd
@@ -45,6 +45,9 @@ class RelationshipDiscoveryResult:
     relationships: List[semantic_model_pb2.Relationship]
     tables: List[Table]
     summary: RelationshipSummary
+    # Real per-relationship confidence scores, keyed by relationship name.
+    # Populated from the inference side-channel; empty if unavailable.
+    confidence_by_name: Dict[str, float] = field(default_factory=dict)
 
 
 def _normalize_table_names(table_names: Optional[Iterable[str]]) -> Optional[List[str]]:
@@ -59,6 +62,55 @@ def _normalize_table_names(table_names: Optional[Iterable[str]]) -> Optional[Lis
         ]
         normalized.append(".".join(parts))
     return normalized
+
+
+def _apply_key_prefilter(metadata_df: pd.DataFrame) -> pd.DataFrame:
+    """Stage 0: keep only join-key-candidate columns before sampling/profiling.
+
+    Reuses the role-filter heuristic in ``key_pruning.is_join_key_candidate``.
+    Conservative: primary keys and identifier-like columns are always kept; if a
+    table would lose *all* its columns, its columns are kept unfiltered so the
+    table still participates (avoids accidentally dropping a whole table).
+    """
+    from semantic_model_generator.clickzetta_utils.clickzetta_connector import (
+        _COLUMN_NAME_COL,
+        _DATATYPE_COL,
+        _IS_PRIMARY_KEY_COL,
+        _TABLE_NAME_COL,
+    )
+    from semantic_model_generator.relationships.key_pruning import (
+        is_join_key_candidate,
+    )
+
+    if _COLUMN_NAME_COL not in metadata_df.columns:
+        return metadata_df
+
+    has_pk_col = _IS_PRIMARY_KEY_COL in metadata_df.columns
+
+    def _keep_row(row) -> bool:
+        is_pk = bool(row[_IS_PRIMARY_KEY_COL]) if has_pk_col else False
+        return is_join_key_candidate(
+            str(row[_COLUMN_NAME_COL]),
+            str(row.get(_DATATYPE_COL, "")) if _DATATYPE_COL in metadata_df.columns else "",
+            is_primary_key=is_pk,
+            table_name=str(row.get(_TABLE_NAME_COL, "")),
+        )
+
+    mask = metadata_df.apply(_keep_row, axis=1)
+    filtered = metadata_df[mask]
+
+    # Safety: never let a table disappear entirely due to filtering.
+    if _TABLE_NAME_COL in metadata_df.columns:
+        kept_tables = set(filtered[_TABLE_NAME_COL].astype(str).str.upper())
+        all_tables = set(metadata_df[_TABLE_NAME_COL].astype(str).str.upper())
+        missing = all_tables - kept_tables
+        if missing:
+            rescue = metadata_df[
+                metadata_df[_TABLE_NAME_COL].astype(str).str.upper().isin(missing)
+            ]
+            filtered = pd.concat([filtered, rescue], ignore_index=True)
+
+    return filtered if not filtered.empty else metadata_df
 
 
 def _build_tables_from_dataframe(
@@ -295,6 +347,7 @@ def discover_relationships_from_tables(
         relationships=relationships,
         tables=[table for _, table in raw_tables],
         summary=summary,
+        confidence_by_name=dict(status.get("confidence_by_name", {})),
     )
 
 
@@ -342,9 +395,18 @@ def discover_relationships_from_schema(
     min_confidence: float = 0.5,
     timeout_seconds: Optional[float] = 30.0,
     max_tables: Optional[int] = 60,
+    key_prefilter: bool = False,
 ) -> RelationshipDiscoveryResult:
     """
     Discover table relationships for all tables in a ClickZetta schema.
+
+    ``key_prefilter`` (Stage 0): when True, restrict the columns that get
+    sampled/profiled to join-key candidates (primary keys + identifier-like
+    columns), skipping measures / free text / timestamps. This is the biggest
+    efficiency lever on wide schemas (100 tables / 2000 columns) because it cuts
+    per-column sampling down to the few key-like columns. Defaults to False to
+    preserve existing behavior; flip on and compare with the precision/recall
+    harness before making it the default.
     """
     normalized_tables = _normalize_table_names(table_names)
 
@@ -355,6 +417,9 @@ def discover_relationships_from_schema(
         table_names=normalized_tables,
     )
     metadata_df.columns = [str(col).upper() for col in metadata_df.columns]
+
+    if key_prefilter and not metadata_df.empty:
+        metadata_df = _apply_key_prefilter(metadata_df)
 
     if metadata_df.empty:
         logger.warning(

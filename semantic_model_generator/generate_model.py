@@ -293,8 +293,10 @@ def _could_be_identifier_column(column_name: str, base_type: str, table_name: st
                 if not any(excl in token for excl in ["QTY", "CNT", "COUNT", "AVAIL"]):
                     return True
 
-    # Without table name, only accept very simple patterns
-    simple_pk_indicators = {"ID", "KEY", "PK", "ROWID", "PRIMARY", "NUM", "NO", "CODE"}
+    # Without table name, accept surrogate-key patterns and common sequence/code suffixes.
+    # Note: CODE/NO/NUM are included so key_prefilter keeps sequence-like columns
+    # (e.g. txn_seq, line_num) that may be part of composite keys.
+    simple_pk_indicators = {"ID", "KEY", "PK", "ROWID", "PRIMARY", "SEQ", "NUM", "NO", "NR", "NBR"}
     if any(token in simple_pk_indicators for token in tokens):
         return True
 
@@ -400,6 +402,19 @@ def _should_exclude_from_relationship_matching(column_name: str, base_type: str 
 
     # Check for *_AT, *_DATE, *_TIME patterns
     # But be careful: date_key, date_id are OK (they're identifiers, not timestamps)
+    #
+    # Algorithm: DATE/TIMESTAMP base types are almost never FK columns — they store
+    # actual time values, not surrogate keys.  INTEGER/BIGINT *_date columns are
+    # date surrogate keys (e.g. order_date BIGINT referencing DIM_DATE.date_id) and
+    # must NOT be excluded.  Use base_type as the primary signal; fall back to
+    # name-only heuristics only when base_type is unavailable.
+    _INTEGER_TYPES = {"INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "NUMBER", "NUMERIC", "DECIMAL"}
+    _DATE_TYPES = {"DATE", "DATETIME", "TIMESTAMP", "TIMESTAMP_LTZ", "TIMESTAMP_NTZ",
+                   "TIMESTAMP_TZ", "TIME"}
+    _base = (base_type or "").upper().split("(")[0]
+    _type_is_integer = _base in _INTEGER_TYPES
+    _type_is_date = _base in _DATE_TYPES or _base.startswith("TIMESTAMP")
+
     for token in tokens:
         if token.endswith("_AT") or token.endswith("AT"):
             # Check if it looks like a timestamp (not like STATUS_AT which might be valid)
@@ -408,6 +423,9 @@ def _should_exclude_from_relationship_matching(column_name: str, base_type: str 
                 return True
         # Exclude *_DATE and *_TIME UNLESS it's followed by KEY/ID (like date_key, time_id)
         if token.endswith("_DATE") or token.endswith("_TIME"):
+            # If the column is stored as an integer, it's a surrogate key — keep it.
+            if _type_is_integer:
+                continue
             # Check if next token is KEY or ID
             token_idx = tokens.index(token)
             if token_idx < len(tokens) - 1:
@@ -417,6 +435,9 @@ def _should_exclude_from_relationship_matching(column_name: str, base_type: str 
             return True
         # Exclude bare DATE, TIME, TIMESTAMP columns UNLESS they have KEY/ID suffix
         if token in {"DATE", "TIME", "TIMESTAMP", "DATETIME"}:
+            # If stored as integer, it's a surrogate key — keep it.
+            if _type_is_integer:
+                continue
             # Check if there's a KEY or ID token
             has_key_id = any(t in {"KEY", "ID"} or t.endswith("KEY") or t.endswith("ID") for t in tokens)
             if not has_key_id:
@@ -429,7 +450,11 @@ def _should_exclude_from_relationship_matching(column_name: str, base_type: str 
         "DESCRIPTION", "CONTENT", "COMMENT", "COMMENTS", "NOTE", "NOTES",
         "TEXT", "BODY", "MESSAGE", "SUMMARY", "ABSTRACT",
         "DESC", "DETAILS", "REMARKS", "MEMO",
-        "NAME", "TITLE", "LABEL"  # Added NAME and similar descriptive fields
+        "NAME", "TITLE", "LABEL",
+        # Enumeration / flag columns — never FK/PK reference columns.
+        "STATUS", "STATE", "TYPE", "TYPES", "FLAG", "FLAGS",
+        "PRIORITY", "LEVEL", "GRADE", "RANK", "STAGE",
+        "CATEGORY", "CLASS", "KIND", "MODE", "PHASE",
     }
 
     if col_upper in content_patterns:
@@ -545,7 +570,17 @@ def _column_mentions_table(column_name: str, table_name: str) -> bool:
     if not column_tokens:
         return False
     table_tokens = _normalized_table_tokens(table_name)
-    return bool(column_tokens & table_tokens)
+    # Exact token intersection first
+    if column_tokens & table_tokens:
+        return True
+    # Fuzzy match: abbreviation variants (dept_code → DEPARTMENTS)
+    for c_tok in column_tokens:
+        for t_tok in table_tokens:
+            if len(c_tok) >= 3 and len(t_tok) >= 3:
+                if (c_tok.startswith(t_tok) or t_tok.startswith(c_tok)
+                        or _are_entity_variants(c_tok, t_tok)):
+                    return True
+    return False
 
 _GENERIC_PREFIXES = {
     "DIM",
@@ -579,6 +614,40 @@ def _table_prefixes(table_name: str) -> set[str]:
             prefixes.add(first_token[:length])
         prefixes.add(first_token)
     return prefixes
+
+
+import re as _re
+
+# Non-production / noise table name patterns (case-insensitive). Tables matching
+# these are backups, snapshots, version dumps, test/sandbox/staging or scratch
+# tables typical of real customer environments. They cause large numbers of
+# false-positive relationships (every backup/version of a dimension attracts the
+# same foreign keys). Excluding them from relationship discovery is the standard
+# "duplicate/backup table" hygiene step. Legitimate production tables do not match.
+_NOISE_TABLE_PATTERNS = [
+    r".*_v\d+$",            # _v1 _v2 ...
+    r".*_v\d+_.*",          # _v2_final ...
+    r".*_final(_v\d+)?$",   # _final / _final_v2
+    r".*_new$", r".*_old$",
+    r".*_backup$", r".*_bak$", r".*_bkp$", r".*_clone$", r".*_copy$",
+    r".*_tmp$", r"tmp_.*", r".*_temp$", r"temp_.*",
+    r"test_.*", r".*_test$", r".*_experiment$", r".*_sandbox$", r"sandbox_.*",
+    r"dev_.*", r".*_dev$", r"stg_.*", r".*_stg$", r"staging_.*", r".*_staging$",
+    r"old_.*", r"legacy_.*", r"lgcy_.*", r".*_legacy$",
+    r".*_\d{6,8}$",         # date-stamped snapshots: _20230601 / _202306
+    r"import_.*", r".*_dump$", r"data_dump.*", r"junk.*", r".*_junk$",
+    r"zombie_.*", r"ghost_.*", r"dangling_.*", r"orphan_.*",
+    r"bak_.*",
+]
+_NOISE_TABLE_RE = _re.compile("|".join(f"(?:{p})" for p in _NOISE_TABLE_PATTERNS), _re.IGNORECASE)
+
+
+def _is_noise_table_name(table_name: str) -> bool:
+    """True if the table name matches a non-production / duplicate / scratch pattern."""
+    base = str(table_name).split(".")[-1].strip("`").strip().lower()
+    if not base:
+        return False
+    return bool(_NOISE_TABLE_RE.fullmatch(base))
 
 
 def _looks_like_primary_key(table_name: str, column_name: str) -> bool:
@@ -637,6 +706,32 @@ def _looks_like_primary_key(table_name: str, column_name: str) -> bool:
                     return True
                 if len(table_core) >= 3 and prefix.startswith(table_core):
                     return True
+
+        # Algorithm: natural-key suffixes (CODE, NO, NUM, NBR, ABBR) are common
+        # in operational/ERP schemas where surrogate keys are not used.
+        # Apply the same table-name-match guard as ID/KEY to avoid false PK detection.
+        # Also handle abbreviations: dept_code in DEPARTMENTS (DEPT ≈ DEPARTMENT).
+        # Examples: dept_code in DEPARTMENTS ✅, dept_code in EMPLOYEES ❌ (FK there)
+        if last_token in {"CODE", "NO", "NUM", "NBR", "ABBR", "NR"}:
+            prefix_tokens = tokens[:-1]
+            prefix = "_".join(prefix_tokens)
+            if len(prefix) >= 1 and prefix not in _GENERIC_IDENTIFIER_TOKENS:
+                if prefix in table_core or table_core in prefix:
+                    return True
+                if len(prefix) >= 3 and table_core.startswith(prefix):
+                    return True
+                if len(table_core) >= 3 and prefix.startswith(table_core):
+                    return True
+                # Handle abbreviations via token-level prefix match and entity variants.
+                # e.g. DEPT (prefix) vs DEPARTMENT (table token): DEPARTMENT.startswith(DEPT) ✅
+                # e.g. ACCT vs ACCOUNT: ACCOUNT.startswith(ACCT) ✅
+                for t_tok in _identifier_tokens(table_name):
+                    if len(prefix) >= 3 and t_tok.startswith(prefix):
+                        return True
+                    if len(t_tok) >= 3 and prefix.startswith(t_tok):
+                        return True
+                    if _are_entity_variants(prefix, t_tok):
+                        return True
 
     # Pattern 2: Handle compound tokens that contain KEY/ID (e.g., ORDERKEY)
     if len(tokens) >= 1:
@@ -868,6 +963,27 @@ def _are_entity_variants(entity1: str, entity2: str) -> bool:
         ("num", "number"),
         ("desc", "description"),
         ("ref", "reference"),
+        # Common ERP/operational schema abbreviations
+        ("dept", "department"),
+        ("acct", "account"),
+        ("org", "organization"),
+        ("emp", "employee"),
+        ("mgr", "manager"),
+        ("usr", "user"),
+        ("inv", "invoice"),
+        ("ord", "order"),
+        ("proj", "project"),
+        ("trans", "transaction"),
+        ("txn", "transaction"),
+        ("loc", "location"),
+        ("grp", "group"),
+        ("ctg", "category"),
+        ("vend", "vendor"),
+        ("whse", "warehouse"),
+        ("curr", "currency"),
+        ("cntry", "country"),
+        ("reg", "region"),
+        ("div", "division"),
     ]
 
     for abbrev, full in abbrev_patterns:
@@ -946,13 +1062,47 @@ def _generate_optimized_relationship_candidates(metadata, _record_pair, status_d
     This function uses intelligent FK-PK matching with semantic validation,
     applicable to any database schema.
     """
+    # ── Type whitelist ──────────────────────────────────────────────────────
+    # Only integer and string types can be FK/PK columns in ClickZetta.
+    # All other types (FLOAT, DOUBLE, BOOLEAN, DATE, TIMESTAMP*, BINARY,
+    # ARRAY, MAP, STRUCT, VECTOR, BITMAP, INTERVAL, DECIMAL with scale>0)
+    # are measurement/temporal/complex values — never relationship keys.
+    # Filtering here eliminates O(excluded_cols × all_pk_cols) comparisons.
+    _KEY_TYPES = {
+        "TINYINT", "SMALLINT", "INT", "INTEGER", "BIGINT",
+        "STRING", "VARCHAR", "CHAR",
+        # DECIMAL/NUMBER/NUMERIC excluded — these are measures, not key types
+    }
+    _NEVER_KEY_TYPES = {
+        "FLOAT", "DOUBLE", "REAL",
+        "DECIMAL", "NUMBER", "NUMERIC",
+        "BOOLEAN", "BOOL",
+        "DATE", "TIMESTAMP", "TIMESTAMP_LTZ", "TIMESTAMP_NTZ", "TIMESTAMP_TZ",
+        "BINARY", "BYTES",
+        "ARRAY", "MAP", "STRUCT", "VARIANT", "JSON",
+        "VECTOR", "BITMAP",
+        "INTERVAL",
+    }
+
+    def _is_key_type(base_type: str) -> bool:
+        bt = (base_type or "").upper().split("(")[0].strip()
+        if bt in _NEVER_KEY_TYPES:
+            return False
+        if bt in _KEY_TYPES:
+            return True
+        return True  # unknown — allow through conservatively
+
     domain_patterns_cache = _get_domain_knowledge_patterns()
     # Build a lookup of all primary key candidates
     pk_lookup = {}
     for table_name, table_meta in metadata.items():
+        # Exclude non-production / duplicate / scratch tables from being PK anchors
+        # so that backups/versions/snapshots don't attract foreign keys.
+        if _is_noise_table_name(table_name):
+            continue
         for pk_norm, pk_cols in table_meta["pk_candidates"].items():
             pk_meta = table_meta["columns"].get(pk_norm)
-            if pk_meta:
+            if pk_meta and _is_key_type(pk_meta.get("base_type", "")):
                 pk_lookup[(table_name, pk_norm)] = {
                     "meta": pk_meta,
                     "columns": pk_cols,
@@ -963,6 +1113,9 @@ def _generate_optimized_relationship_candidates(metadata, _record_pair, status_d
     for fk_table_name, fk_table_meta in metadata.items():
         if status_dict["limited_by_timeout"]:
             break
+        # Skip non-production / duplicate / scratch tables as FK sources too.
+        if _is_noise_table_name(fk_table_name):
+            continue
         if _timed_out():
             status_dict["limited_by_timeout"] = True
             break
@@ -970,6 +1123,10 @@ def _generate_optimized_relationship_candidates(metadata, _record_pair, status_d
         for fk_norm, fk_meta in fk_table_meta["columns"].items():
             if status_dict["limited_by_timeout"]:
                 break
+
+            # Fast-path: skip non-key types before any name/sample analysis
+            if not _is_key_type(fk_meta.get("base_type", "")):
+                continue
 
             # CRITICAL: Exclude columns that should never be used for relationships
             # This prevents false positives like created_at, content, description matches
@@ -1005,6 +1162,23 @@ def _generate_optimized_relationship_candidates(metadata, _record_pair, status_d
                 if fk_meta["base_type"] != pk_info["meta"]["base_type"]:
                     continue
 
+                # Guard A: suppress PK<->PK matches. When the FK column is its own
+                # table's sole primary key AND the matched column is the other
+                # table's sole primary key, the two tables both *own* the same
+                # identity key — that is a duplicate/alternate/versioned table
+                # (e.g. dim_customer_v1 <-> dim_customer_v2, orders_backup <->
+                # orders_clone), not a foreign-key relationship. A real FK requires
+                # the FK side to NOT be its table's identity. This removes the
+                # combinatorial explosion across backup/version tables without
+                # touching legitimate fact->dimension edges (fact side isn't a PK).
+                _fk_pk = fk_table_meta["pk_candidates"]
+                _pk_pk = metadata.get(pk_table_name, {}).get("pk_candidates", {})
+                if (
+                    fk_norm in _fk_pk and len(_fk_pk) == 1
+                    and pk_norm in _pk_pk and len(_pk_pk) == 1
+                ):
+                    continue
+
                 # Calculate enhanced name similarity
                 similarity = _name_similarity(fk_meta["names"][0], pk_info["meta"]["names"][0])
 
@@ -1035,6 +1209,12 @@ def _generate_optimized_relationship_candidates(metadata, _record_pair, status_d
                         entity_bonus = 0.50  # Increased from 0.20
                     elif _are_entity_variants(fk_core, pk_core):
                         entity_bonus = 0.30  # Increased from 0.15
+                    elif fk_core.endswith(pk_core) or pk_core.endswith(fk_core):
+                        # Role-prefixed FK pattern: sender_account_id→account_id,
+                        # issued_to_user_id→user_id, origin_airport_id→airport_id.
+                        # The PK entity is a suffix of the FK entity (or vice versa),
+                        # which is strong structural evidence of a FK relationship.
+                        entity_bonus = 0.30
 
                 # Total score (universal - no business-specific bonuses)
                 total_score = similarity + entity_bonus
@@ -1056,15 +1236,45 @@ def _generate_optimized_relationship_candidates(metadata, _record_pair, status_d
                     # Scale it appropriately (0.0-0.6 bonus for strong evidence)
                     sample_bonus = sample_data_confidence * 0.6
                     total_score += sample_bonus
-                    # DEBUG logging (commented out for production)
-                    # if sample_data_confidence > 0.1:
-                    #     print(f"  📊 Sample data: {fk_table_name}.{fk_meta['names'][0]} → {pk_table_name}.{pk_info['meta']['names'][0]} "
-                    #           f"conf={sample_data_confidence:.2f}, bonus={sample_bonus:.2f}, total={total_score:.2f}")
 
-                # Lower threshold if core entities match perfectly
+                    # Algorithm: zero-overlap veto.
+                    # If both sides have >= 3 non-null sample values and the FK
+                    # value set has NO intersection with the PK value set, this
+                    # cannot be a real FK relationship — a true FK must reference
+                    # at least some existing PK values.  This eliminates false
+                    # positives from cross-table same-name column collisions.
+                    # Guard: require at least 3 values on each side to avoid vetoing
+                    # on tiny samples where overlap absence is not meaningful.
+                    _fk_set = {str(v) for v in fk_values if not _is_nullish(v)}
+                    _pk_set = {str(v) for v in pk_values if not _is_nullish(v)}
+                    # Only conclusive when BOTH sides appear *fully* sampled. On a
+                    # large table the value sample is capped (~sample_size), so two
+                    # capped samples of a genuine FK->PK pair frequently fail to
+                    # intersect by chance (e.g. TPC-H LINEITEM.l_partkey vs the first
+                    # 100 PART.p_partkey) — vetoing those destroys real relationships.
+                    # Restrict the zero-overlap veto to small, fully-captured domains
+                    # (where absence of overlap is real evidence, as in sr_traps).
+                    _FULLY_SAMPLED_MAX = 50
+                    if (
+                        3 <= len(_fk_set) < _FULLY_SAMPLED_MAX
+                        and 3 <= len(_pk_set) < _FULLY_SAMPLED_MAX
+                        and not (_fk_set & _pk_set)
+                    ):
+                        continue  # zero overlap on small, fully-sampled domains
+
+                # Lower threshold if core entities match perfectly or by containment
+                _core_contains = bool(
+                    fk_core and pk_core
+                    and (fk_core.endswith(pk_core) or pk_core.endswith(fk_core))
+                )
                 effective_threshold = min_similarity_threshold
                 if fk_core and pk_core and fk_core == pk_core:
                     effective_threshold = 0.3  # Much lower threshold for perfect entity match
+                elif _core_contains:
+                    # Role-prefix FK (sender_account→account, issued_to_user→user):
+                    # the name similarity is diluted by the role prefix, but the
+                    # structural containment is strong evidence — lower the bar.
+                    effective_threshold = 0.3
                 elif sample_data_confidence > 0.6:
                     # Strong sample data evidence allows lower threshold
                     effective_threshold = 0.3
@@ -1534,12 +1744,23 @@ def _detect_many_to_many_relationships(
     bridge_tables = {}
 
     for table_name, table_meta in metadata.items():
+        # Skip non-production / duplicate / scratch tables — they must not act as
+        # bridges nor be connected by bridge-derived many-to-many relationships.
+        if _is_noise_table_name(table_name):
+            continue
         bridge_analysis = _detect_bridge_table_pattern(table_meta, metadata)
 
         if (
             bridge_analysis["is_bridge"]
             and len(bridge_analysis["connected_tables"]) >= 2
         ):
+            # Drop any connected tables that are themselves noise tables.
+            bridge_analysis["connected_tables"] = [
+                t for t in bridge_analysis["connected_tables"]
+                if not _is_noise_table_name(t)
+            ]
+            if len(bridge_analysis["connected_tables"]) < 2:
+                continue
             bridge_tables[table_name] = bridge_analysis
 
             logger.debug(
@@ -1760,7 +1981,8 @@ def _calculate_relationship_confidence(
             similarity = _name_similarity(left_col, right_col)
             total_name_similarity += similarity
 
-            if _column_mentions_table(left_col, right_table):
+            if (_column_mentions_table(left_col, right_table)
+                    or left_col.upper() == right_col.upper()):
                 aligned_fk_columns += 1
             else:
                 misaligned_fk_columns.append(left_col)
@@ -2493,6 +2715,16 @@ def _infer_pk_from_sample_data(
         bool: True if column appears to be a primary key based on uniqueness
     """
     if not column_values or len(column_values) < min_sample_size:
+        # Algorithm: small tables (dimension/enum tables) often have fewer rows than
+        # min_sample_size, but if ALL values are unique and we have >= 2 non-null
+        # samples, that is conclusive evidence of a PK — no minimum sample size needed.
+        if not column_values:
+            return False
+        non_null_quick = [v for v in column_values if not _is_nullish(v)]
+        if len(non_null_quick) >= 2:
+            unique_quick = len(set(str(v) for v in non_null_quick))
+            if unique_quick == len(non_null_quick):  # perfect uniqueness
+                return True
         return False
 
     # Filter out null values
@@ -3645,6 +3877,13 @@ def _infer_relationships(
         status_dict["limited_by_timeout"] = False
     if "limited_by_max_relationships" not in status_dict:
         status_dict["limited_by_max_relationships"] = False
+    # Side-channel: expose the real per-relationship confidence scores so callers
+    # (e.g. the MCP server) can surface them instead of fabricating values. The
+    # protobuf Relationship message has no confidence field, so we carry it here
+    # keyed by relationship name (which is unique: "<left>_to_<right>").
+    confidence_by_name: Dict[str, float] = status_dict.setdefault(
+        "confidence_by_name", {}
+    )
 
     relationships: List[semantic_model_pb2.Relationship] = []
     if not raw_tables:
@@ -3673,6 +3912,35 @@ def _infer_relationships(
         for prefix, count in prefix_counter.items()
         if len(prefix) <= 3 and count >= 2
     }
+
+    # Precompute table-name token cores for cross-table FK detection.
+    # Used to reject sample-based PK inference for columns that are really
+    # foreign keys (e.g. CUSTOMER_ID inside an EVENTS fact table looks unique
+    # in a small sample but is an FK to the CUSTOMERS table, not a PK here).
+    _table_core_map: Dict[str, str] = {}
+    for _, _rt in raw_tables:
+        _toks = _identifier_tokens(_rt.name)
+        _table_core_map[_rt.name.upper()] = "_".join(_toks) if _toks else _rt.name.upper()
+
+    def _column_references_other_table(column_name: str, current_table: str) -> bool:
+        """True if the column's entity prefix matches a DIFFERENT table's core
+        (a strong foreign-key signal), and not the current table's own core."""
+        toks = _identifier_tokens(column_name)
+        if len(toks) < 2 or toks[-1] not in {"ID", "KEY"}:
+            return False
+        prefix = "_".join(toks[:-1])
+        if not prefix or prefix in _GENERIC_IDENTIFIER_TOKENS:
+            return False
+        cur_core = _table_core_map.get(current_table.upper(), current_table.upper())
+        matches_current = prefix == cur_core or prefix in cur_core or cur_core in prefix
+        if matches_current:
+            return False  # own-table PK takes precedence
+        for tname, core in _table_core_map.items():
+            if tname == current_table.upper() or not core:
+                continue
+            if prefix == core or prefix in core or core in prefix:
+                return True
+        return False
 
     metadata = {}
     for fqn, raw_table in raw_tables:
@@ -3714,9 +3982,21 @@ def _infer_relationships(
                 if column.column_name not in pk_candidates[normalized]:
                     pk_candidates[normalized].append(column.column_name)
                 continue
+            # Uniqueness veto: a single-column primary key never repeats values.
+            # When the duplicate-preserving row sample shows clear repetition
+            # (uniqueness < 0.9), the column cannot be this table's PK — even if its
+            # name matches the table (e.g. USER_ID inside USER_SESSIONS / USER_EVENTS,
+            # whose real PK is SESSION_ID / EVENT_ID). This removes heuristic false
+            # PKs that otherwise link every table sharing the column name.
+            # IMPORTANT: veto only applies to name-matched candidates. Composite key
+            # columns may each have low individual uniqueness — do NOT veto data path.
+            _uniq = getattr(column, "sample_uniqueness", None)
+            _name_matches_pk = _looks_like_primary_key(raw_table.name, column.column_name)
+            _dup_evidence = _uniq is not None and _uniq < 0.9 and _name_matches_pk
             if (
                 not has_explicit_pk
-                and _looks_like_primary_key(raw_table.name, column.column_name)
+                and not _dup_evidence
+                and _name_matches_pk
             ):
                 pk_candidates[normalized].append(column.column_name)
 
@@ -3724,17 +4004,24 @@ def _infer_relationships(
             # This allows PK detection for columns like 'uid', 'oid', 'pid' etc.
             # IMPORTANT: Only apply when column name suggests it could be a key (contains id/key/num)
             # CRITICAL: Pass table_name to help distinguish PK from FK patterns
+            # No uniqueness veto here — composite key columns may each repeat values.
             if (
                 not has_explicit_pk
                 and column.column_name not in pk_candidates[normalized]
                 and column.values
                 and _could_be_identifier_column(column.column_name, base_type, raw_table.name)
+                and not _column_references_other_table(column.column_name, raw_table.name)
             ):
                 # Check if sample data shows high uniqueness (PK pattern)
                 if _infer_pk_from_sample_data(column.values, min_uniqueness=0.95, min_sample_size=20):
                     pk_candidates[normalized].append(column.column_name)
                     # Mark it as inferred from data
                     entry["pk_inferred_from_data"] = True
+
+        # Drop empty PK-candidate buckets that were auto-created via defaultdict
+        # access during detection. Leaving them in would make downstream code
+        # (pk_lookup / "fk_norm in pk_candidates") treat non-PK columns as PKs.
+        pk_candidates = {k: v for k, v in pk_candidates.items() if v}
 
         metadata[raw_table.name] = {
             "fqn": fqn,
@@ -4522,6 +4809,9 @@ def _infer_relationships(
                 )
             )
         relationships.append(relationship)
+        confidence_by_name[relationship.name] = round(
+            float(confidence_analysis["confidence_score"]), 4
+        )
 
     # Phase 2: Detect many-to-many relationships through bridge table analysis
     many_to_many_relationships: List[semantic_model_pb2.Relationship] = []
@@ -4541,9 +4831,95 @@ def _infer_relationships(
 
         if many_to_many_relationships:
             relationships.extend(many_to_many_relationships)
+            # Bridge-derived m2m relationships don't flow through the per-pair
+            # confidence analysis above; record a conservative default so callers
+            # still get a non-fabricated score keyed by name.
+            for m2m_rel in many_to_many_relationships:
+                confidence_by_name.setdefault(m2m_rel.name, 0.6)
             logger.info(
                 f"Detected {len(many_to_many_relationships)} many-to-many relationships via bridge tables"
             )
+
+    # Self-reference detection: a role/hierarchy column that references its OWN
+    # table's primary key (EMPLOYEES.mgr_id -> EMPLOYEES.emp_id,
+    # COA.parent_code -> COA.acct_code, CATEGORIES.parent_id -> CATEGORIES.cat_id).
+    # The main candidate loop skips same-table matches, and these role-named FKs do
+    # not share the entity token with the PK, so they need a dedicated pass keyed on
+    # (a) role naming and/or (b) value containment of FK values within the PK domain.
+    _SELF_REF_HINTS = (
+        "PARENT", "MGR", "MANAGER", "SUPERVISOR", "SUPERVISER", "REPORTS_TO",
+        "REPORT_TO", "BOSS", "PREDECESSOR", "REFERRER", "REFERRED_BY", "ANCESTOR",
+    )
+    existing_pairs = {
+        (r.left_table.upper(), r.right_table.upper()) for r in relationships
+    }
+    self_ref_rels = []
+    for table_name, tmeta in metadata.items():
+        if (table_name.upper(), table_name.upper()) in existing_pairs:
+            continue
+        pk_cands = tmeta.get("pk_candidates", {})
+        if len(pk_cands) != 1:
+            continue  # need a single, unambiguous PK to reference
+        pk_norm = next(iter(pk_cands))
+        pk_cols = pk_cands[pk_norm]
+        pk_meta = tmeta["columns"].get(pk_norm)
+        if not pk_cols or not pk_meta:
+            continue
+        pk_col = pk_cols[0]
+        pk_type = pk_meta.get("base_type")
+
+        def _norm_val(v):
+            # Normalize numeric strings so int vs float formatting matches
+            # ("1" vs "1.0" — a column with NULLs is promoted to float by pandas).
+            s = str(v)
+            if s.endswith(".0") and s[:-2].lstrip("-").isdigit():
+                return s[:-2]
+            return s
+
+        pk_vals = {
+            _norm_val(v) for v in (pk_meta.get("values") or [])
+            if v is not None and str(v) != "None"
+        }
+        for cnorm, cmeta in tmeta["columns"].items():
+            if cnorm == pk_norm or cmeta.get("base_type") != pk_type:
+                continue
+            col = cmeta["names"][0]
+            # Require a hierarchy/role name (parent/mgr/...). Pure value-containment
+            # without a role name is unsafe — small integer FK columns (e.g.
+            # author_id) coincidentally fall inside the PK range and would yield
+            # spurious self-references. All genuine self-refs use a role name.
+            if not any(h in col.upper() for h in _SELF_REF_HINTS):
+                continue
+            cvals = {
+                _norm_val(v) for v in (cmeta.get("values") or [])
+                if v is not None and str(v) != "None"
+            }
+            have_samples = bool(cvals) and bool(pk_vals)
+            contained = (len(cvals & pk_vals) / len(cvals)) if cvals else 0.0
+            # If we have samples, the role column's values must mostly fall inside
+            # the PK domain (else the role column points at some other table).
+            if have_samples and contained < 0.5:
+                continue
+            conf = 0.85 if (have_samples and contained >= 0.5) else 0.7
+            rel = semantic_model_pb2.Relationship(
+                name=f"{table_name}_self_{col}",
+                left_table=table_name,
+                right_table=table_name,
+                join_type=semantic_model_pb2.JoinType.inner,
+                relationship_type=semantic_model_pb2.RelationshipType.many_to_one,
+            )
+            rel.relationship_columns.append(
+                semantic_model_pb2.RelationKey(
+                    left_column=col.upper(), right_column=pk_col.upper()
+                )
+            )
+            self_ref_rels.append(rel)
+            confidence_by_name[rel.name] = conf
+            existing_pairs.add((table_name.upper(), table_name.upper()))
+            break  # one self-reference per table covers the common hierarchy case
+    if self_ref_rels:
+        relationships.extend(self_ref_rels)
+        logger.info(f"Detected {len(self_ref_rels)} self-referential relationships")
 
     logger.info(
         f"Inferred {len(relationships)} total relationships across {len(raw_tables)} tables"

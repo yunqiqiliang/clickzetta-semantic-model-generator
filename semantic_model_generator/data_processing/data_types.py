@@ -1,4 +1,4 @@
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic.dataclasses import dataclass
 
@@ -24,6 +24,11 @@ class Column:
         None  # comment field's to save the column comment user specified on the column
     )
     is_primary_key: bool = False
+    # Fraction of distinct values in the raw (duplicate-preserving) row sample,
+    # i.e. distinct_count / non_null_count. None when not measured. Used to veto
+    # primary-key candidates whose sample shows clear duplication (a column that
+    # repeats values cannot be a single-column primary key).
+    sample_uniqueness: Optional[float] = None
 
     def __post_init__(self: Any) -> None:
         """
